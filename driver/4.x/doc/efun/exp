@@ -1,0 +1,12 @@
+NAME
+	exp - e raised to the power of x
+
+SYNTAX
+	float exp(float x);
+
+DESCRIPTION
+	Return e to the power of x.
+
+SEE ALSO
+	cos, sin, tan, asin, acos, atan, sqrt, log, pow
+

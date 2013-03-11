@@ -1,0 +1,16 @@
+NAME
+	strlen - give the length of a string
+
+SYNOPSIS
+	int strlen(int|string str, void|int ignore_color)
+
+OPTIONS 
+	str          - the string to get the length of
+                       if an integer is passed 0 is returned
+	ignore_color - if true ansi color codes are ignored
+                       during calculation of string length
+
+DESCRIPTION
+	Gives the length of a string in number of characters.
+
+

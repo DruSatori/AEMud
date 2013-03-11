@@ -1,0 +1,12 @@
+NAME
+	log - natural logarithm
+
+SYNTAX
+	float log(float v);
+
+DESCRIPTION
+	Return the natural logarithm of v.
+
+SEE ALSO
+	cos, sin, tan, asin, acos, atan, sqrt, pow, exp
+

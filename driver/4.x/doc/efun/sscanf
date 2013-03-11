@@ -1,0 +1,51 @@
+NAME
+	sscanf - Parse a string with a given format
+
+SYNOPSIS
+	int sscanf(string str, string fmt, mixed var1, mixed var2 ...)
+
+DESCRIPTION
+	sscanf works vey much like its Unix counterpart. The string
+	str is broken up according to the format pattern in fmt.
+	Valid symbols are:
+
+	normal text - matches character for character
+
+	%d - matches an integer number
+
+	%s - matches a character string
+
+	%f - matches a float
+		Example:
+		sscanf("4.43e-2", "%f", f);
+                		       -2
+		will set f to 4.43 * 10  .
+
+	%*[dsf] - matches as above, but does not require a variable.
+
+	Return value:
+	The number of variables var1, var2 etc that matched.
+
+EXAMPLES
+	sscanf("one two", "%s %s", a, b)
+	Return == 2, a == "one", b == "two"
+
+	sscanf("one two", "%*s %s", a, b)
+	Return == 2, a == "two", b == 0
+
+	This happens because the '%*s' matches a pattern but does
+	not assign a variable, so the next assigned match that
+	requires a variable will be assigned to the first unset
+	variable (which is a) and any others will be ignored.
+
+	If this becomes a problem, I can fix it, however the '*'
+	argument is to prevent the need for dummy variables and
+	fixing this would negate the purpose.
+
+NOTA BENE
+
+SEE ALSO
+
+CAVEAT
+
+BUGS

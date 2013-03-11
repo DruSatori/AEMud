@@ -1,0 +1,13 @@
+NAME
+	pow - return a to the power of b
+
+SYNTAX
+	float log(float a,float b);
+
+DESCRIPTION
+	Return a to the power of b. Can not be written as a^b as that
+	current means 'xor' and only works for integers.
+
+SEE ALSO
+	cos, sin, tan, asin, acos, atan, sqrt, log, exp
+

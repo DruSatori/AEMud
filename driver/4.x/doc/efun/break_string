@@ -1,0 +1,38 @@
+NAME
+	break_string - break a string at regular intervals
+	
+SYNOPSIS
+	string break_string(int|string text, void|int len, 
+			    void|int|string indent, void|int start)
+
+DESCRIPTION
+	This function breaks a continous string without newlines into a
+	a string with newlines inserted at every `len':th character. 
+
+	If 'len' isn't specified or is '0', a players screen width
+	setting will be used.
+
+	If 'len' is set to '1', the default of 78 will be used.
+
+	If `indent' is defined and is given as an integer, `indent' number
+	of spaces are inserted after every newline. If `indent'	is a string 
+	that string is inserted after every newline.
+
+	If indenting is used, you may fine tune the indenting via the
+	'start' argument.  This is a number of 'lines' to go by,
+	counting from line 1.  A setting in the range of '-1..1' will
+	cause all lines to be indented.  Otherwise, it works as follows:
+	
+ 	  - a positive # means start indenting on line 'start'.
+	  - a negative # means stop indenting on line 'start'.
+
+	You can produce some nice basic textual formatting by creative
+	use of the arguments.
+
+	If 'text' is an integer, the function simply returns 0.
+	If 'indent' is greater then 1000, no formatting is done.
+	if 'start' is < -100 or > 100, no formatting is done.
+
+SEE ALSO
+	implode, explode, sprintf
+

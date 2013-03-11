@@ -1,0 +1,12 @@
+NAME
+	asin - arcus sinus
+
+SYNTAX
+	float asin(float v);
+
+DESCRIPTION
+	Return the arcsine value of v, given in radians.
+
+SEE ALSO
+	cos, sin, tan, acos, atan, sqrt, log, pow, exp
+

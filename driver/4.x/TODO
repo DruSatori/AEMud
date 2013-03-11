@@ -1,0 +1,6 @@
+Use timeval for current_time
+Need driver alarms
+Swap should be driven off a timeout, not polled
+Rewrite call_out.c
+Document remaining efuns (mostly floating point stuff)
+Document driver callback functions (to master)
