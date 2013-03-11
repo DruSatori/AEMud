@@ -1,0 +1,11 @@
+NAME
+	function_name - return the name of a function
+
+SYNTAX
+	string function_name(function fun);
+
+DESCRIPTION
+	Returns the name of a function pointed to by the functionpointer fun.
+
+SEE ALSO
+	function_object, call_function

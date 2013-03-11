@@ -1,0 +1,12 @@
+NAME
+	sin - sinus
+
+SYNTAX
+	float sin(float rad);
+
+DESCRIPTION
+	Return the sinus value of rad. rad is given in radians.
+
+SEE ALSO
+	cos, tan, asin, acos, atan, sqrt, log, pow, exp
+

@@ -1,0 +1,13 @@
+NAME
+	function_object - return the object that contains the function
+
+SYNTAX
+	object function_object(function fun);
+
+DESCRIPTION
+	Returns the object that contains the function fun.
+
+SEE ALSO
+	function_name, call_function
+
+

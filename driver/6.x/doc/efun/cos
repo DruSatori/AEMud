@@ -1,0 +1,12 @@
+NAME
+	cos - cosine
+
+SYNTAX
+	float cos(float rad);
+
+DESCRIPTION
+	Return the cosine value of rad. rad is given in radians.
+
+SEE ALSO
+	sin, tan, asin, acos, atan, sqrt, log, pow, exp
+

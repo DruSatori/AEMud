@@ -1,0 +1,12 @@
+NAME
+	tan - tangent
+
+SYNTAX
+	float tan(float rad);
+
+DESCRIPTION
+	Return the tangent value of rad. rad is given in radians.
+
+SEE ALSO
+	cos, sin, asin, acos, atan, sqrt, log, pow, exp
+

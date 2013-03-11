@@ -1,0 +1,12 @@
+NAME
+	atan - arcus tangent
+
+SYNTAX
+	float atan(float v);
+
+DESCRIPTION
+	Return the arctan value of v, given in radians.
+
+SEE ALSO
+	cos, sin, tan, asin, acos, sqrt, log, pow, exp
+

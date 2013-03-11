@@ -1,0 +1,12 @@
+NAME
+	acos - arcus cosinus
+
+SYNTAX
+	float acos(float v);
+
+DESCRIPTION
+	Return the arccosine value of v, given in radians.
+
+SEE ALSO
+	cos, sin, tan, asin, atan, sqrt, log, pow, exp
+
