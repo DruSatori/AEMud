@@ -1,12 +1,12 @@
 NAME
-	cos - cosine
+        cos - trigonometric function operating on float
 
-SYNTAX
-	float cos(float rad);
+SYNOPSIS
+        float   cos(float)
 
 DESCRIPTION
-	Return the cosine value of rad. rad is given in radians.
+        cos() returns the cosine of a floating point number.
+        Input value in radians.
 
 SEE ALSO
-	sin, tan, asin, acos, atan, sqrt, log, pow, exp
-
+        math - for a list of other math functions available.

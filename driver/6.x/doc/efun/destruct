@@ -2,7 +2,7 @@ NAME
 	destruct - destruct an object
 
 SYNOPSIS
-	void destruct()
+	void destruct(object ob)
 
 DESCRIPTION
 	This function destroys the indicated object.

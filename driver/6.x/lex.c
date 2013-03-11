@@ -15,24 +15,21 @@
 #include "lex.h"
 #include "mstring.h"
 #include "mudstat.h"
-
+#include "simulate.h"
 #include "efun_table.h"
+#include "backend.h"
+#include "hash.h"
 
 #define isalunum(c) (isalnum(c) || (c) == '_')
 #define NELEM(a) (sizeof (a) / sizeof((a)[0]))
 
-#define	WARNING	0
-#define	ERROR	1
-
-extern void fatal(char *fmt, ...);
+#define WARNING 0
+#define ERROR   1
 
 int current_line;
-int total_lines;	/* Used to compute average compiled lines/s */
+int total_lines;    /* Used to compute average compiled lines/s */
 char *current_file;
-int pragma_strict_types;	/* Force usage of strict types. */
-#ifdef BINARIES
-int pragma_save_binary;		/* Save this in the binary shadow dir */
-#endif
+int pragma_strict_types;    /* Force usage of strict types. */
 int pragma_no_clone;
 int pragma_no_inherit;
 int pragma_no_shadow;
@@ -40,8 +37,7 @@ int pragma_resident;
 
 extern void smart_log (char *, int, char *);
 struct lpc_predef_s *lpc_predefs=NULL;
-static int number (int), real (double), ident (char *), string (char *);
-static int islocal (char *);
+static int number (long long), real (double), ident (char *), string (char *);
 static void handle_define (char *);
 static void free_defines (void), add_define (char *, int, char *);
 static int expand_define (void);
@@ -66,11 +62,7 @@ static int inc_list_size;
 #define EXPANDMAX 25000
 static int nexpands;
 
-extern char *local_names[];
-extern int local_blockdepth[];
-extern int current_number_of_locals, s_flag;
-
-extern char *tmpstring_copy(char *);
+extern int s_flag;
 
 #ifndef tolower
 extern int tolower (int);
@@ -108,9 +100,12 @@ static struct incstate {
     char *file;
     int slast, lastchar;
     int pragma_strict_types;
+    int nbuf;
+    char *outp;
 } *inctop = 0;
 
-#define DEFMAX 10000
+/* DEFMAX must be even. We divide it by 2 in mygetc(). */
+#define DEFMAX 20000
 static char defbuf[DEFMAX];
 static int nbuf;
 static char *outp;
@@ -121,87 +116,87 @@ static struct {
     YYSTYPE lval;
 } keep1, keep2, keep3, keep4;
 
-void 
-merge(char *name, char *dest)
+static void 
+calculate_include_path(char *name, char *dest)
 {
-    char *from;
+    char *current;
 
-    (void)strcpy(dest, current_file);
-    if ( (from = strrchr(dest, '/')) != NULL)   /* strip filename */
-	*from = 0;
-    else
-	/* current_file was the file_name */
-	/* include from the root directory */
-	*dest = 0;
-
-    from = name;
-    while (*from == '/')
+    if ( (current = strrchr(dest, '/')) == NULL)   /* strip filename */
     {
-	from++;
-	*dest = 0;	/* absolute path */
+	/* current_file is in the root directory */
+	current = dest;
+    }
+    *current = '\0';
+
+    while (*name == '/')
+    {
+	name++;
+	current = dest;
+	*current = '\0';  /* absolute path */
     }
 
-    while(*from)
+    while (*name)
     {
-	if(strncmp(from, "../", 3) == 0)
+	if (strncmp(name, "../", 3) == 0)
 	{
-	    char *tmp;
-	    
-	    if(*dest == 0) /* including from above mudlib is NOT allowed */
+	    if (*dest == '\0') /* including from above mudlib is NOT allowed */
 		break;
-	    tmp = strrchr(dest, '/');
-	    if(tmp == NULL) /* 1 component in dest */
-		*dest = 0;
-	    else
-		*tmp = 0;
-	    from +=3;   /* skip "../" */
+
+	    /* Remove previous path element */
+	    while (current > dest)
+	    {
+		*current-- = '\0';
+		if (*current == '/')
+		    break;
+	    }
+	    if (current == dest)
+	    {
+		*current = '\0';
+	    }
+
+	    name += 3;   /* skip "../" */
 	}
-	else if(strncmp(from, "./", 2) == 0) {
-	    from += 2;
+	else if (strncmp(name, "./", 2) == 0)
+	{
+	    name += 2;
 	}
 	else
 	{ /* append first component to dest */
-	    char *q;
-	    
-	    if(*dest)
-		(void)strcat(dest, "/");    /* only if dest is not empty !! */
-	    q = strchr(from, '/');
-	    
-	    if(q) { /* from has 2 or more components */
-		while(*from=='/') /* find the start */
-		    from++;
-		(void)strncat(dest, from, (size_t)(q - from));
-		for(from = q + 1; *from== '/'; from++)
-		    ;
-	    }
+	    if (*dest)
+		*current++ = '/';    /* only if dest is not empty !! */
+	    while (*name != '\0' && *name != '/')
+		*current++ = *name++;
+	    if (*name == '/')
+		name++;
 	    else
-	    {
-		/* this was the last component */
-		(void)strcat(dest, from);
-		break;
-	    }
+		*current = '\0'; /* Last element */
 	}
     }
 }
 
 static INLINE int
-mygetc()
+mygetc(void)
 {
-    int c;
+    if (!nbuf)
+    {
+        char  buffer[(DEFMAX / 2) + 1];
 
-    if (nbuf)
-    {
-	nbuf--;
-	c = *outp++;
+        if (feof(yyin))
+        {
+            return EOF;
+        } 
+
+        nbuf  = (int)fread(buffer, sizeof(char), (DEFMAX / 2), yyin);
+        outp -= nbuf;
+        memcpy(outp, buffer, nbuf);
     }
-    else
-    {
- 	c = getc(yyin);
-    }
+ 
     lastchar = slast;
-    slast = c;
-/*(void)fprintf(stderr, "c='%c'", c);*/
-    return c;
+    slast = *outp;
+    nbuf--;
+    outp++;
+ 
+    return slast;
 }
 
 static INLINE int
@@ -227,7 +222,7 @@ static void
 lexwarning(char *str)
 {
     (void)fprintf(stderr, "%s: Warning: %s line %d\n", current_file, str,
-		  current_line);
+          current_line);
     (void)fflush(stderr);
     smart_log(current_file, current_line, str);
 }
@@ -239,60 +234,61 @@ skip_to(char *token, char *atoken)
     int c;
     int nest;
 
-    for(nest = 0;;)
+    for (nest = 0;;)
     {
-	c = mygetc();
-	if (c == '#')
+    c = mygetc();
+    if (c == '#')
+    {
+        do
+        {
+	    c = mygetc();
+        } while (isspace(c));
+        for (p = b; c != '\n' && c != EOF; )
+        {
+	    if (p < b+sizeof b-1)
+		*p++ = c;
+	    c = mygetc();
+        }
+        *p++ = 0;
+        for (p = b; *p && !isspace(*p); p++)
+	    ;
+        *p = 0;
+	/*(void)fprintf(stderr, "skip checks %s\n", b);*/
+        if (strcmp(b, "if") == 0 || strcmp(b, "ifdef") == 0 ||
+	    strcmp(b, "ifndef") == 0)
 	{
-	    do
-	    {
-		c = mygetc();
-	    } while(isspace(c));
-	    for(p = b; c != '\n' && c != EOF; )
-	    {
-		if (p < b+sizeof b-1)
-		    *p++ = c;
-		c = mygetc();
-	    }
-	    *p++ = 0;
-	    for(p = b; *p && !isspace(*p); p++)
-		;
-	    *p = 0;
-/*(void)fprintf(stderr, "skip checks %s\n", b);*/
-	    if (strcmp(b, "if") == 0 || strcmp(b, "ifdef") == 0 ||
-		strcmp(b, "ifndef") == 0) {
-		nest++;
-	    }
-	    else if (nest > 0)
-	    {
-		if (strcmp(b, "endif") == 0)
-		    nest--;
-	    }
-	    else
-	    {
-		if (strcmp(b, token) == 0)
-		    return 1;
-		else if (atoken && strcmp(b, atoken) == 0)
-		    return 0;
-	    }
-	}
-	else 
-	{
-	    /*(void)fprintf(stderr, "skipping (%d) %c", c, c);*/
-            while (c != '\n' && c != EOF) 
-	    {
-		c = mygetc();
-		/*(void)fprintf(stderr, "%c", c);*/
-	    } 
-	    if (c == EOF)
-	    {
-		lexerror("Unexpected end of file while skipping");
+	    nest++;
+        }
+        else if (nest > 0)
+        {
+	    if (strcmp(b, "endif") == 0)
+		nest--;
+        }
+        else
+        {
+	    if (strcmp(b, token) == 0)
 		return 1;
-	    }
-	}
-	store_line_number_info(current_incfile, current_line);
-	current_line++;
-	total_lines++;
+	    else if (atoken && strcmp(b, atoken) == 0)
+		return 0;
+        }
+    }
+    else 
+    {
+        /*(void)fprintf(stderr, "skipping (%d) %c", c, c);*/
+	while (c != '\n' && c != EOF) 
+        {
+	    c = mygetc();
+	    /*(void)fprintf(stderr, "%c", c);*/
+        } 
+        if (c == EOF)
+        {
+	    lexerror("Unexpected end of file while skipping");
+	    return 1;
+        }
+    }
+    store_line_number_info(current_incfile, current_line);
+    current_line++;
+    total_lines++;
     }
 }
 
@@ -317,19 +313,20 @@ handle_cond(int c)
     }
 }
 
-/* ARGSUSED1 */
+/* Make sure the path does not have any ".." elements. */
 char *
 check_valid_compile_path(char *path, char *file_name, char *calling_function)
 {
 #if 0
     struct svalue *ret;
 #endif
-    char *p;
+    char *p = path;
     
-    for (p = strchr(path, '.'); p; p = strchr(p + 1, '.')) 
+    while (*p)
     {
-	if (p[1] == '.')
+	if (p[0] == '.' && p[1] == '.')
 	    return NULL;
+	p++;
     }
 #if 0
     push_string(path, STRING_MSTRING);
@@ -342,25 +339,21 @@ check_valid_compile_path(char *path, char *file_name, char *calling_function)
     return path;
 }
 
-static FILE *
-inc_open(char *buf, char *name)
+/* Try to load the file who's full path is specified in buf */
+static INLINE FILE *
+inc_try(char *buf)
 {
     struct incstate *inc;
     char errbuf[1024];
-    FILE *f;
-    int i;
     char *new_name;
+    FILE *f;
 
     extern void remember_include(char *);
     extern char *current_loaded_file;
-    
-    if (incdepth >= MAX_INCLUDE) {
-	lexerror("To deep recursion of includes.");
-	return NULL;
-    }
-    merge(name, buf);
+
     new_name = check_valid_compile_path(buf, current_loaded_file, "include");
-    if (!new_name) {
+    if (!new_name)
+    {
 	lexerror("Invalid include.");
 	return NULL;
     }
@@ -368,48 +361,50 @@ inc_open(char *buf, char *name)
     {
 #ifdef WARN_INCLUDES
 	for (inc = inctop ; inc ; inc = inc->next) 
-	    if (strcmp(inc->file, new_name) == 0) {
+	    if (strcmp(inc->file, new_name) == 0)
+	    {
 		(void)snprintf(errbuf, sizeof(errbuf), "File /%s already included,", buf);
 		lexwarning(errbuf);
 	    }
 #endif
 	if (s_flag)
 	    num_fileread++;
-        remember_include(new_name);
-        return f;
+	remember_include(new_name);
+	return f;
     }
+    return NULL;
+}
 
+/* Find and open a file that has been specified in a "#include <file>" */
+static INLINE FILE *
+inc_open(char *buf, char *name)
+{
+    int i;
+    FILE *f;
+
+    if (incdepth >= MAX_INCLUDE)
+    {
+	lexerror("To deep recursion of includes.");
+	return NULL;
+    }
+    (void)strcpy(buf, current_file);
+    calculate_include_path(name, buf);
+    if ((f = inc_try(buf)) != NULL)
+	return f;
     /*
      * Search all include dirs specified.
      */
     for (i = 0; i < inc_list_size; i++) 
     {
-        (void)sprintf(buf, inc_list[i], name);
-	new_name = check_valid_compile_path(buf, current_loaded_file, "include");
-	if (!new_name) {
-	    lexerror("Invalid include.");
-	    return NULL;
-	}
-        if (new_name && (f = fopen(new_name, "r")))
-	{
-#ifdef WARN_INCLUDES
-	    for (inc = inctop ; inc ; inc = inc->next) 
-		if (strcmp(inc->file, new_name) == 0) {
-		    (void)snprintf(errbuf, sizeof(errbuf), "File /%s already included,", buf);
-		    lexwarning(errbuf);
-		}
-#endif
-	    if (s_flag)
-		num_fileread++;
-	    remember_include(new_name);
+        (void)sprintf(buf, "%s%s", inc_list[i], name);
+	if ((f = inc_try(buf)) != NULL)
 	    return f;
-	}
     }
     return NULL;
 }
 
-static void
-handle_include(char *name)
+int
+handle_include(char *name, int ignore_errors)
 {
     char *p;
     char buf[1024];
@@ -417,11 +412,6 @@ handle_include(char *name)
     struct incstate *is;
     int delim;
 
-/*(void)fprintf(stderr, "handle include '%s'\n", name);*/
-    if (nbuf) {
-	lexerror("Internal preprocessor error");
-	return;
-    }
     if (*name != '"' && *name != '<')
     {
 	struct defn *d;
@@ -429,56 +419,76 @@ handle_include(char *name)
 	{
 	    char *q;
 	    q = d->exps;
-	    while(isspace(*q))
+	    while (isspace(*q))
 		q++;
-	    handle_include(q);
+	    return handle_include(q, ignore_errors);
 	}
 	else
 	{
-	    lexerror("Missing leading \" or < in #include");
+            if (!ignore_errors)
+	        lexerror("Missing leading \" or < in #include");
+            return 0;
 	}
-	return;
     }
     delim = *name++ == '"' ? '"' : '>';
-    for(p = name; *p && *p != delim; p++)
+    for (p = name; *p && *p != delim; p++)
 	;
     if (!*p)
     {
-	lexerror("Missing trailing \" or > in #include");
-	return;
+        if (!ignore_errors)
+	    lexerror("Missing trailing \" or > in #include");
+	return 0;
     }
     if (strlen(name) > sizeof(buf) - 100)
-    {
-	lexerror("Include name too long.");
-	return;
+    { 
+        if (!ignore_errors)
+	    lexerror("Include name too long.");
+	return 0;
     }
     *p = 0;
-    if ((f = inc_open(buf, name)) != NULL) {
-	is = (struct incstate *)xalloc(sizeof(struct incstate));
-	is->yyin = yyin;
-	is->line = current_line;
-	is->file = current_file;
-	is->incfnum = current_incfile;
-	is->slast = slast;
-	is->lastchar = lastchar;
-	is->next = inctop;
-	is->pragma_strict_types = pragma_strict_types;
-	pragma_strict_types = 0;
-	inctop = is;
-	current_line = 1;
-	current_file = xalloc(strlen(buf)+1);
-	current_incfile = ++num_incfiles;
-	(void)strcpy(current_file, buf);
-	slast = lastchar = '\n';
-	yyin = f;
-	incdepth++;
-/*(void)fprintf(stderr, "pushed to %s\n", buf);*/
+    
+    if ((f = inc_open(buf, name)) == NULL)
+    {
+        if (!ignore_errors) {
+	    (void)sprintf(buf, "Cannot #include %s\n", name);
+	    lexerror(buf);
+        }
+        return 0;
+    }
+
+    is = (struct incstate *)xalloc(sizeof(struct incstate));
+    is->yyin = yyin;
+    is->line = current_line;
+    is->file = current_file;
+    is->incfnum = current_incfile;
+    is->slast = slast;
+    is->lastchar = lastchar;
+    is->next = inctop;
+    is->pragma_strict_types = pragma_strict_types;
+
+    if (nbuf)
+    {
+        memcpy(is->outp = (char *)xalloc(nbuf + 1), outp, nbuf);
+        is->nbuf = nbuf;
+        nbuf = 0;
+        outp = defbuf + DEFMAX;
     }
     else
     {
-	(void)sprintf(buf, "Cannot #include %s\n", name);
-	lexerror(buf);
+        is->nbuf = 0;
+        is->outp = NULL;
     }
+
+    pragma_strict_types = 0;
+    inctop = is;
+    current_line = 1;
+    current_file = xalloc(strlen(buf)+1);
+    current_incfile = ++num_incfiles;
+    (void)strcpy(current_file, buf);
+    slast = lastchar = '\n';
+    yyin = f;
+    incdepth++;
+    return 1;
 }
 
 static void
@@ -493,29 +503,29 @@ handle_exception(int action, char *message)
     else
 	(void)strcat(buf, message);
     (void)strcat(buf, "\"");
-
+    
     push_number(action);
     push_string(buf, STRING_MSTRING);
     push_number(current_line);
     push_string(current_file, STRING_MSTRING);
     (void)apply_master_ob(M_PARSE_EXCEPTION, 4);
-
+    
     if (action == ERROR)
 	lexerror("Parse aborted on #error statement,");
 }
 
 static void
-skip_comment()
+skip_comment(void)
 {
     int c;
 
-    for(;;)
+    for (;;)
     {
-	while((c = mygetc()) != '*')
+	while ((c = mygetc()) != '*')
 	{
 	    if (c == EOF)
 	    {
-	        lexerror("End of file in a comment");
+		lexerror("End of file in a comment");
 		return;
 	    }
 	    if (c == '\n') 
@@ -535,16 +545,16 @@ skip_comment()
 		store_line_number_info(current_incfile, current_line);
 		current_line++;
 	    }
-	} while(c == '*');
+	} while (c == '*');
     }
 }
 
 static void
-skip_comment2()
+skip_comment2(void)
 {
     int c;
 
-    while((c = mygetc()) != '\n' && c != EOF)
+    while ((c = mygetc()) != '\n' && c != EOF)
 	;
     if (c == EOF) {
 	lexerror("End of file in a // comment");
@@ -567,7 +577,7 @@ deltrail(char *ap)
     }
     else
     {
-	while(*p && !isspace(*p))
+	while (*p && !isspace(*p))
 	    p++;
 	*p = 0;
     }
@@ -587,11 +597,7 @@ handle_pragma(char *str)
     if (strcmp(str, "strict_types") == 0)
 	pragma_strict_types = 1;
     else if (strcmp(str, "save_binary") == 0)
-#ifdef BINARIES
-	pragma_save_binary = 1;
-#else
 	;
-#endif /* BINARIES */
     else if (strcmp(str, "no_clone") == 0)
 	pragma_no_clone = 1;
     else if (strcmp(str, "no_inherit") == 0)
@@ -607,48 +613,51 @@ handle_pragma(char *str)
 static struct keyword {
     char *word;
     short  token;
-    short min_args;	/* Minimum number of arguments. */
-    short max_args;	/* Maximum number of arguments. */
-    short ret_type;	/* The return type used by the compiler. */
-    unsigned char arg_type1;	/* Type of argument 1 */
-    unsigned char arg_type2;	/* Type of argument 2 */
+    short min_args; /* Minimum number of arguments. */
+    short max_args; /* Maximum number of arguments. */
+    short ret_type; /* The return type used by the compiler. */
+    unsigned char arg_type1;    /* Type of argument 1 */
+    unsigned char arg_type2;    /* Type of argument 2 */
     unsigned char arg_index;
-			/* Index pointing to where to find arg type */
+            /* Index pointing to where to find arg type */
     short Default;      /* an efun to use as default for last argument */
 } predefs[] =
 #include "efun_defs.c"
 
 static struct keyword reswords[] = {
-{ "break",		F_BREAK, },
-{ "case",		F_CASE, },
-{ "catch",		F_CATCH, },
-{ "continue",		F_CONTINUE, },
-{ "default",		F_DEFAULT, },
-{ "do",			F_DO, },
-{ "else",		F_ELSE, },
-{ "float",		F_FLOAT, },
-{ "for",		F_FOR, },
-{ "function",		F_FUNCTION, },
-{ "if",			F_IF, },
-{ "inherit",		F_INHERIT, },
-{ "int",		F_INT, },
-{ "mapping",		F_MAPPING, },
-{ "mixed",		F_MIXED, },
-{ "nomask",		F_NO_MASK, },
-{ "object",		F_OBJECT, },
-{ "operator",		F_OPERATOR, },
-{ "parse_command",	F_PARSE_COMMAND, },
-{ "private",		F_PRIVATE, },
-{ "public",		F_PUBLIC, },
-{ "return",		F_RETURN, },
-{ "sscanf",		F_SSCANF, },
-{ "static",		F_STATIC, },
-{ "status",		F_STATUS, },
-{ "string",		F_STRING_DECL, },
-{ "switch",		F_SWITCH, },
-{ "varargs",		F_VARARGS, },
-{ "void",		F_VOID, },
-{ "while",		F_WHILE, },
+{ "break",      F_BREAK, },
+{ "case",       F_CASE, },
+{ "catch",      F_CATCH, },
+{ "continue",       F_CONTINUE, },
+{ "default",        F_DEFAULT, },
+{ "do",         F_DO, },
+{ "else",       F_ELSE, },
+{ "float",      F_FLOAT, },
+{ "for",        F_FOR, },
+{ "foreach",	F_FOREACH, },
+{ "function",       F_FUNCTION, },
+{ "if",         F_IF, },
+{ "inherit",        F_INHERIT, },
+{ "int",        F_INT, },
+{ "mapping",        F_MAPPING, },
+{ "mixed",      F_MIXED, },
+{ "nomask",     F_NO_MASK, },
+{ "object",     F_OBJECT, },
+{ "operator",       F_OPERATOR, },
+{ "parse_command",  F_PARSE_COMMAND, },
+{ "private",        F_PRIVATE, },
+{ "public",     F_PUBLIC, },
+{ "return",     F_RETURN, },
+{ "sscanf",     F_SSCANF, },
+{ "static",     F_STATIC, },
+{ "status",     F_STATUS, },
+{ "string",     F_STRING_DECL, },
+{ "switch",     F_SWITCH, },
+{ "throw",	F_THROW },
+{ "try",        F_TRY, },
+{ "varargs",        F_VARARGS, },
+{ "void",       F_VOID, },
+{ "while",      F_WHILE, },
 };
 
 struct instr instrs[EFUN_LAST - EFUN_FIRST + 1];
@@ -657,20 +666,20 @@ static int
 lookupword(char *s, struct keyword *words, int h)
 {
     int i, l, r;
-
+    
     l = 0;
-    for(;;)
+    for (;;)
     {
-      i = (l + h) / 2;
-      r = strcmp(s, words[i].word);
-      if (r == 0)
-          return words[i].token;
-      else if (l == i)
-          return -1;
-      else if (r < 0)
-          h = i;
-      else
-          l = i;
+	i = (l + h) / 2;
+	r = strcmp(s, words[i].word);
+	if (r == 0)
+	    return words[i].token;
+	else if (l == i)
+	    return -1;
+	else if (r < 0)
+	    h = i;
+	else
+	    l = i;
     }
 }
 
@@ -681,13 +690,13 @@ lookup_resword(char *s)
 }
 
 static int
-yylex1()
+yylex1(void)
 {
     register char *yyp;
     register int c;
     register int c1, c2;
     
-    for(;;)
+    for (;;)
     {
 	if (lex_fatal)
 	{
@@ -703,7 +712,7 @@ yylex1()
 		(void)fclose(yyin);
 		/*(void)fprintf(stderr, "popping to %s\n", p->file);*/
 		free(current_file);
-		nexpands=0;
+		nexpands = 0;
 		current_file = p->file;
 		current_line = p->line + 1;
 		current_incfile = p->incfnum;
@@ -712,16 +721,32 @@ yylex1()
 		slast = p->slast;
 		lastchar = p->lastchar;
 		inctop = p->next;
+		
+		if (p->nbuf)
+		{
+		    nbuf = p->nbuf;
+		    outp = defbuf + DEFMAX - nbuf;
+		    memcpy(outp, p->outp, nbuf);
+		    free((char *)p->outp);
+		}
+		else
+		{
+		    nbuf = 0;
+		    outp = defbuf + DEFMAX;
+		}
+		
 		store_line_number_info(current_incfile, current_line);
 		incdepth--;
 		
 		free((char *)p);
 		break;
 	    }
-	    if (iftop) {
+	    if (iftop)
+	    {
 		struct ifstate *p = iftop;
 		lexerror(p->state == EXPECT_ENDIF ? "Missing #endif" : "Missing #else");
-		while(iftop) {
+		while (iftop)
+		{
 		    p = iftop;
 		    iftop = p->next;
 		    free((char *)p);
@@ -735,7 +760,7 @@ yylex1()
 	    current_line++;
 	    total_lines++;
 	}
-	    /* FALLTHROUGH */
+        /* FALLTHROUGH */
 	case ' ':
 	case '\t':
 	case '\f':
@@ -769,7 +794,8 @@ yylex1()
 	    TRY('=', F_LE);
 	    return c;
 	case '>':
-	    if (gobble('>')) {
+	    if (gobble('>'))
+	    {
 		TRY('=', F_RSH_EQ);
 		return F_RSH;
 	    }
@@ -782,10 +808,13 @@ yylex1()
 	    TRY('=', F_MOD_EQ);
 	    return F_MOD;
 	case '/':
-	    if (gobble('*')) {
+	    if (gobble('*'))
+	    {
 		skip_comment();
 		break;
-	    } else if (gobble('/')) {
+	    }
+	    else if (gobble('/'))
+	    {
 		skip_comment2();
 		break;
 	    }
@@ -813,13 +842,14 @@ yylex1()
 	    TRY(':', F_COLON_COLON);
 	    return ':';
 	case '.':
-	    if (gobble('.')) {
+	    if (gobble('.'))
+	    {
 		if (gobble('.'))
 		    return F_VARARG;
 		else
 		    return F_RANGE;
 	    }
-	    goto badlex;
+	    return c;
 	case '#':
 	    if (lastchar == '\n') 
 	    {
@@ -832,18 +862,18 @@ yylex1()
 		    c = mygetc();
 		} while (isspace(c));
 		
-		for(quote = 0;;) 
+		for (quote = 0;;) 
 		{
 		    if (c == '"')
 			quote ^= 1;
 		    
 		    /*gc - handle comments cpp-like! 1.6.91 @@@*/
-		    while(!quote && c == '/')  
+		    while (!quote && c == '/')  
 		    {
-			if(gobble('*')) 
+			if (gobble('*')) 
 			{ 
 			    skip_comment();
-			    c=mygetc();
+			    c = mygetc();
 			}
 			else 
 			    break;
@@ -859,7 +889,7 @@ yylex1()
 		if (ssp) 
 		{
 		    *ssp++ = 0;
-		    while(isspace(*ssp))
+		    while (isspace(*ssp))
 			ssp++;
 		} 
 		else 
@@ -876,48 +906,58 @@ yylex1()
 #if 0
 		    short int nega=0; /*@@@ allow #if !VAR gc 1.6.91*/
 		    if (*ssp=='!'){ ssp++; nega=1;}
-		    if (isdigit(*ssp)) {
+		    if (isdigit(*ssp))
+		    {
 			char *p;
 			long l;
 			l = strtol(ssp, &p, 10);
-			while(isspace(*p))
+			while (isspace(*p))
 			    p++;
 			if (*p)
 			    lexerror("Condition too complex in #if");
 			else
-			    handle_cond(nega?!(int)l:(int)l);
-		    } else if (isalunum(*ssp)) {
+			    handle_cond(nega ? !(int)l : (int)l);
+		    }
+		    else if (isalunum(*ssp))
+		    {
 			char *p = ssp;
-			while(isalunum(*p))
+			while (isalunum(*p))
 			    p++;
-			if (*p) {
+			if (*p)
+			{
 			    *p++ = 0;
-			    while(isspace(*p))
+			    while (isspace(*p))
 				p++;
 			}
 			if (*p)
 			    lexerror("Condition too complex in #if");
-			else {
+			else
+			{
 			    struct defn *d;
 			    d = lookup_define(ssp);
-			    if (d) {
-				handle_cond(nega?!atoi(d->exps):atoi(d->exps));/* a hack! */
-			    } else {
+			    if (d)
+			    {
+				handle_cond(nega ? !atoi(d->exps) : atoi(d->exps));/* a hack! */
+			    }
+			    else
+			    {
 				handle_cond(nega?1:0); /* cpp-like gc*/
 			    }
 			}
-		    } else
+		    }
+		    else
 			lexerror("Condition too complex in #if");
 #else
 		    int cond;
-		    
+            
 		    myungetc(0);
 		    add_input(ssp);
 		    cond = cond_get_exp(0);
 		    if (mygetc()) 
 		    {
 			lexerror("Condition too complex in #if");
-			while ( mygetc() ) ;
+			while (mygetc())
+			    ;
 		    }
 		    else
 			handle_cond(cond);
@@ -955,234 +995,283 @@ yylex1()
 		else if (strcmp("endif", yytext) == 0) 
 		{
 		    if (iftop && (iftop->state == EXPECT_ENDIF ||
-			      iftop->state == EXPECT_ELSE)) 
-		{
-		    struct ifstate *p = iftop;
-
-		    /*(void)fprintf(stderr, "found endif\n");*/
-		    iftop = p->next;
-		    free((char *)p);
+				  iftop->state == EXPECT_ELSE)) 
+		    {
+			struct ifstate *p = iftop;
+			
+			/*(void)fprintf(stderr, "found endif\n");*/
+			iftop = p->next;
+			free((char *)p);
+		    } 
+		    else 
+		    {
+			lexerror("Unexpected #endif");
+		    }
 		} 
+		else if (strcmp("undef", yytext) == 0) 
+		{
+		    struct defn *d;
+		    
+		    deltrail(ssp);
+		    if ((d = lookup_define(ssp)) != NULL )
+			d->undef++;
+		} 
+		else if (strcmp("echo", yytext) == 0) 
+		{
+		    (void)fprintf(stderr, "%s\n", ssp);
+		} 
+		else if (strcmp("include", yytext) == 0) 
+		{
+		    /*(void)fprintf(stderr, "including %s\n", ssp);     */
+		    handle_include(ssp, 0);
+		}
+		else if (strcmp("pragma", yytext) == 0)
+		{
+		    deltrail(ssp);
+		    handle_pragma(ssp);
+		} 
+		else if (strcmp("error", yytext) == 0)
+		{
+		    handle_exception(ERROR, ssp);
+		}
+		else if (strcmp("warning", yytext) == 0)
+		{
+		    handle_exception(WARNING, ssp);
+		}
 		else 
 		{
-		    lexerror("Unexpected #endif");
+		    lexerror("Unrecognised # directive");
 		}
-	    } 
-	    else if (strcmp("undef", yytext) == 0) 
-	    {
-		struct defn *d;
-
-		deltrail(ssp);
-		if ( (d = lookup_define(ssp)) != NULL )
-		    d->undef++;
-	    } 
-	    else if (strcmp("echo", yytext) == 0) 
-	    {
-		(void)fprintf(stderr, "%s\n", ssp);
-	    } 
-	    else if (strcmp("include", yytext) == 0) 
-	    {
-		/*(void)fprintf(stderr, "including %s\n", ssp);		*/
-                handle_include(ssp);
-	    }
-	    else if (strcmp("pragma", yytext) == 0)
-	    {
-		deltrail(ssp);
-		handle_pragma(ssp);
-	    } 
-	    else if (strcmp("error", yytext) == 0)
-	    {
-		handle_exception(ERROR, ssp);
-	    }
-	    else if (strcmp("warning", yytext) == 0)
-	    {
-		handle_exception(WARNING, ssp);
-	    }
-	    else 
-	    {
-		lexerror("Unrecognised # directive");
-	    }
-	    myungetc('\n');
-	    break;
-	} else
-	    goto badlex;
-    case '\'':
-	yylval.number = mygetc();
-	if (yylval.number == '\\')
-	{
-	    int tmp = mygetc();
-	    if (tmp == 'n') {
-		yylval.number = '\n';
-	    } else if (tmp == 't') {
-		yylval.number = '\t';
-	    } else if (tmp == 'r') {
-		yylval.number = '\r';
-	    } else if (tmp == 'b') {
-		yylval.number = '\b';
-	    } else if (tmp == 'a') {
-		yylval.number = '\a';
-	    } else if (tmp == 'v') {
-		yylval.number = '\v';
-	    } else if (tmp == '\'' || tmp == '\\' || tmp == '"') {
-		yylval.number = tmp;
-	    } else {
-		lexwarning("Bad character escape sequence");
-		yylval.number = tmp;
-	    }
-	}
-	if (!gobble('\''))
-	    lexerror("Illegal character constant");
-	return F_NUMBER;
-    case '"':
-	yyp = yytext;
-	*yyp++ = c;
-	for(;;) {
-	    c = mygetc();
-	    if (c == EOF) {
- 		lexerror("End of file in string");
-		return string("\"\"");
-	    } else if (c == '\n') {
- 		lexerror("Newline in string");
-		return string("\"\"");
-	    }
-	    SAVEC;
-	    if (c == '"')
+		myungetc('\n');
 		break;
-	    if (c == '\\') {
-		c = mygetc();
-		if ( c == '\n' ) {
-		    yyp--;
-		    store_line_number_info(current_incfile, current_line);
-		    current_line++;
-		    total_lines++;
-		} 
-		else if ( c == EOF ) 
+	    }
+	    else
+		goto badlex;
+	case '\'':
+	    yylval.number = mygetc();
+	    if (yylval.number == '\\')
+	    {
+		int tmp = mygetc();
+		switch (tmp)
 		{
-		    /* some operating systems give EOF only once */
-		    myungetc(c); 
-		} 
-		else *yyp++ = c;
-	    }
-	}
-	*yyp = 0;
-	return string(yytext);
-
-    case '0':
-	c = mygetc();
-	if ( c == 'X' || c == 'x' ) 
-	{
-	    yyp = yytext;
-	    for(;;) 
-	    {
-		c = mygetc();
-		SAVEC;
-		if (!isxdigit(c))
+		case 'n': yylval.number = '\n'; break;
+		case 't': yylval.number = '\t'; break;
+		case 'b': yylval.number = '\b'; break;
+		case 'a': yylval.number = '\a'; break;
+		case 'v': yylval.number = '\v'; break;
+		case '\'':
+		case '\\':
+		case '"':
+		    yylval.number = tmp; break;
+		default:
+		    lexwarning("Bad character escape sequence");
+		    yylval.number = tmp;
 		    break;
+		}
 	    }
-	    myungetc(c);
-	    return number( (int)strtol(yytext,(char**)NULL,0x10) );
-	}
-	myungetc(c);
-	c = '0';
-	/* FALLTHROUGH */
-    case '1':case '2':case '3':case '4':
-    case '5':case '6':case '7':case '8':case '9':
-	yyp = yytext;
-	*yyp++ = c;
-	for(;;) {
-	    c = mygetc();
-	    if (!isdigit(c))
-		break;
-	    SAVEC;
-	}
-        if (c == '.')
-        {
-           if (isdigit(c1 = mygetc()))
-           {
-                extern double atof(const char *);
-                SAVEC;
-                c = c1;
-                SAVEC;
-                for(c = mygetc(); isdigit(c); c = mygetc())
-                    SAVEC;
-                if (c == 'e' || c == 'E')
-                {
-                    c1 = mygetc();
-                    if (c1 == '-' || c1 == '+')
-                    {
-                        c2 = mygetc();
-                        if (isdigit(c2))
-                        {
-                            SAVEC;
-                            c = c1;
-                            SAVEC;
-                            c = c2;
-                            SAVEC;
-                            for(c = mygetc(); isdigit(c); c = mygetc())
-                                SAVEC;
-                        }
-                        else
-                        {
-                            myungetc(c2);
-                            myungetc(c1);
-                        }
-                    }
-                    else if (isdigit(c1))
-                    {
-                        SAVEC;
-                        c = c1;
-                        SAVEC;
-                        for(c = mygetc(); isdigit(c); c = mygetc())
-                            SAVEC;
-                    }
-                    else
-                        myungetc(c1);
-                }
-	        myungetc(c);
-	        *yyp = 0;
-	        return real(atof(yytext));
-            }
-            myungetc(c1);
-        }
-	myungetc(c);
-	*yyp = 0;
-        if (*yytext == '0')
-	    return number( (int)strtol(yytext,(char**)NULL,0x8) );
-	return number(atoi(yytext));
-    default:
-	if (isalpha(c) || c == '_') {
-	    int r;
-
+	    if (!gobble('\''))
+		lexerror("Illegal character constant");
+	    return F_NUMBER;
+	case '"':
 	    yyp = yytext;
 	    *yyp++ = c;
-	    for(;;) {
+	    for (;;)
+	    {
 		c = mygetc();
-		if (!isalunum(c))
+		if (c == EOF)
+		{
+		    lexerror("End of file in string");
+		    return string("\"\"");
+		}
+		else if (c == '\n')
+		{
+		    lexerror("Newline in string");
+		    return string("\"\"");
+		}
+		SAVEC;
+		if (c == '"')
+		    break;
+		if (c == '\\')
+		{
+		    c = mygetc();
+		    if ( c == '\n' )
+		    {
+			yyp--;
+			store_line_number_info(current_incfile, current_line);
+			current_line++;
+			total_lines++;
+		    } 
+		    else if ( c == EOF ) 
+		    {
+			/* some operating systems give EOF only once */
+			myungetc(c); 
+		    } 
+		    else
+			*yyp++ = c;
+		}
+	    }
+	    *yyp = 0;
+	    return string(yytext);
+
+	case '0':
+	    c = mygetc();
+	    if ( c == 'X' || c == 'x' || c == 'o') 
+	    {
+                char *endptr;
+                long long value;
+                int base = 16;
+                if (c == 'o')
+                    base = 8;
+
+                
+		yyp = yytext;
+
+		for (;;) 
+		{
+		    c = mygetc();
+		    if (!isxdigit(c))
+			break;
+                    SAVEC;
+		}
+		myungetc(c);
+                *yyp = '\0';
+                
+                value = strtoll(yytext, &endptr, base);
+                if (*endptr != '\0')
+                {
+                    fprintf(stderr, "%s\n", yytext);
+                    lexwarning("Invalid digits in octal number number");
+                }
+                
+                return number(value);
+	    }
+	    myungetc(c);
+	    c = '0';
+	    /* FALLTHROUGH */
+	case '1':
+	case '2':
+	case '3':
+	case '4':
+	case '5':
+	case '6':
+	case '7':
+	case '8':
+	case '9':
+	    yyp = yytext;
+	    *yyp++ = c;
+	    for (;;)
+	    {
+		c = mygetc();
+		if (!isdigit(c))
 		    break;
 		SAVEC;
 	    }
-	    *yyp = 0;
-
-	    myungetc(c);
-	    if (!expand_define()) {
-		r = lookup_resword(yytext);
-		if (r >= 0) {
-		    return r;
-		} else
-		    return ident(yytext);
+	    if (c == '.')
+	    {
+		if (isdigit(c1 = mygetc()))
+		{
+		    SAVEC;
+		    c = c1;
+		    SAVEC;
+		    for (c = mygetc(); isdigit(c); c = mygetc())
+			SAVEC;
+		    if (c == 'e' || c == 'E')
+		    {
+			c1 = mygetc();
+			if (c1 == '-' || c1 == '+')
+			{
+			    c2 = mygetc();
+			    if (isdigit(c2))
+			    {
+				SAVEC;
+				c = c1;
+				SAVEC;
+				c = c2;
+				SAVEC;
+				for (c = mygetc(); isdigit(c); c = mygetc())
+				    SAVEC;
+			    }
+			    else
+			    {
+				myungetc(c2);
+				myungetc(c1);
+			    }
+			}
+			else if (isdigit(c1))
+			{
+			    SAVEC;
+			    c = c1;
+			    SAVEC;
+			    for (c = mygetc(); isdigit(c); c = mygetc())
+				SAVEC;
+			}
+			else
+			    myungetc(c1);
+		    }
+		    myungetc(c);
+		    *yyp = 0;
+		    return real(strtod(yytext, NULL));
+		}
+		myungetc(c1);
 	    }
-	    break;
-        }
-	goto badlex;
+	    myungetc(c);
+	    *yyp = 0;
+	    if (*yytext == '0')
+            {
+                /* OCTALS */
+                char *endptr;
+                long long value;
+
+                value = strtoll(yytext, &endptr, 010);
+
+                if (*endptr != '\0')
+                    lexwarning("Invalid digits in octal number");
+
+                if (value != 0)
+                    lexwarning("Obsolete octal format used. Use 0o111 syntax");
+                
+		return number(value);
+            }
+	    return number(atoll(yytext));
+	default:
+	    if (isalpha(c) || c == '_') {
+		int r;
+		
+		yyp = yytext;
+		*yyp++ = c;
+		for (;;)
+		{
+		    c = mygetc();
+		    if (!isalunum(c))
+			break;
+		    SAVEC;
+		}
+		*yyp = 0;
+		
+		myungetc(c);
+		if (!expand_define())
+		{
+		    r = lookup_resword(yytext);
+		    if (r >= 0)
+		    {
+			return r;
+		    }
+		    else
+			return ident(yytext);
+		}
+		break;
+	    }
+	    goto badlex;
+	}
     }
-  }
- badlex:
-  { char buff[100]; (void)sprintf(buff, "Illegal character (hex %02x) '%c'", c, c);
-    lexerror(buff); return ' '; }
+  badlex:
+    {
+	char buff[100]; (void)sprintf(buff, "Illegal character (hex %02x) '%c'", c, c);
+	lexerror(buff); return ' '; }
 }
 
 int
-yylex()
+yylex(void)
 {
     int r;
 
@@ -1217,7 +1306,7 @@ yylex()
 	    {
 		/*
 		 * 1:string 2:non-'+'
-		 *	save 2, return 1
+		 *  save 2, return 1
 		 */
 		keep1.token = r;
 		yylval = keep4.lval;
@@ -1232,7 +1321,7 @@ yylex()
 	    {
 		/*
 		 * 1:string 2:'+' 3:non-string
-		 * 	save 2 and 3, return 1
+		 *  save 2 and 3, return 1
 		 */
 		keep1.token = '+';
 		keep2.token = r;
@@ -1244,10 +1333,11 @@ yylex()
 	    r = yylex1();
 	    keep3.line = current_line;
 	    keep3.lval = yylval;
-	    if (r == '[' || r == F_ARROW) {
+	    if (r == '[' || r == F_ARROW)
+	    {
 		/*
 		 * 1:string 2:'+' 3:string 4:[->
-		 *	save 2, 3, 4, return 1
+		 *  save 2, 3, 4, return 1
 		 */
 		keep1.token = '+';
 		keep2.token = F_STRING;
@@ -1260,42 +1350,22 @@ yylex()
 	     * concatenate string constants
 	     */
 	    keep3.lval.string = tmpalloc(strlen(keep4.lval.string) +
-				       strlen(keep2.lval.string) + 1);
+					 strlen(keep2.lval.string) + 1);
 	    (void)strcpy(keep3.lval.string, keep4.lval.string);
 	    (void)strcat(keep3.lval.string, keep2.lval.string);
 	    keep4.line = keep2.line;
 	    keep4.lval.string = keep3.lval.string;
 	}
     }
-/*    (void)fprintf(stderr, "lex=%d(%s) ", r, yytext);*/
+    /*    (void)fprintf(stderr, "lex=%d(%s) ", r, yytext);*/
     return r;
 }
  
 extern YYSTYPE yylval;
 
 static int 
-islocal(char *str)
-{
-    int i;
-
-    for (i = current_number_of_locals - 1; i >= 0; i--)
-    {
-	if (local_blockdepth[i] != -1 && strcmp(local_names[i], str) == 0)
-            return i;
-    }
-    return -1;
-}
-
-static int 
 ident(char *str)
 {
-    int i;
-   
-    i = islocal(str);
-    if (i >= 0) {
-        yylval.number = i;
-        return F_LOCAL_NAME;
-    }
     yylval.string = tmpstring_copy(str);
     return F_IDENTIFIER;
 }
@@ -1305,12 +1375,15 @@ string(char *str)
 {
     char *p;
 
-    if (!*str) {
+    if (!*str)
+    {
 	str = "\"\"";
     }
     p = tmpalloc(strlen(str) + 1);
     yylval.string = p;
-    for (str++; str[0] && str[1] ; str++, p++)  {
+    for (str++; str[0] && str[1] ; str++, p++)
+    {
+	/* Copy the similar one to here /JH */
 	if (str[0] == '\\') {
 	    if (str[1] == 'n') {
 		*p = '\n';
@@ -1339,7 +1412,7 @@ string(char *str)
 }
 
 static int 
-number(int i)
+number(long long i)
 {
     yylval.number = i;
     return F_NUMBER;
@@ -1348,16 +1421,12 @@ number(int i)
 static int
 real(double f)
 {
-    if (f != 0.0 && (fabs(f) < FLT_MIN || fabs(f) > FLT_MAX)) {
-	lexerror("Floating point constant exceeds limit.");
-	f = 0.0;
-    }
-    yylval.real = (float)f;
+    yylval.real = f;
     return F_FLOATC;
 }
 
 void 
-end_new_file()
+end_new_file(void)
 {
     while (inctop)
     {
@@ -1368,12 +1437,18 @@ end_new_file()
 	current_file = p->file;
 	yyin = p->yyin;
 	inctop = p->next;
+	
+	if (p->outp != NULL)
+	{
+	    free((char *)p->outp);
+	}
+	
 	free((char *)p);
     }
-    while(iftop)
+    while (iftop)
     {
 	struct ifstate *p;
-
+	
 	p = iftop;
 	iftop = p->next;
 	free((char *)p);
@@ -1381,12 +1456,25 @@ end_new_file()
     free_defines();
 }
 
+/*
+ * Function name : ltoa
+ * Description   : function converts integer into it's text representation
+ * Arguments     : int       - the integer number to be converted
+ * Returns       : char*     - the integer textual representation
+ */
+static inline char*
+ltoa(long long intval)
+{
+    static char buffer[25];
+
+    sprintf(buffer, "%lld", intval);
+    return buffer;
+}
 
 void
 start_new_file(FILE *f)
 {
     struct lpc_predef_s *tmpf;
-
     free_defines();
     add_define("_FUNCTION", -1, "");
     add_define("LPC4", -1, "");   /* Tell coders this is LPC ver 4.0 */
@@ -1394,15 +1482,19 @@ start_new_file(FILE *f)
 #ifdef DEBUG
     add_define("DEBUG_DRIVER", -1, "");
 #endif
-#ifdef COLOUR_SUPPORT
-    add_define("COLOUR_SUPPORT", -1, "" );
-#endif
+    add_define("T_INTEGER" , -1, ltoa(T_NUMBER));
+    add_define("T_FLOAT"   , -1, ltoa(T_FLOAT));
+    add_define("T_STRING"  , -1, ltoa(T_STRING));
+    add_define("T_OBJECT"  , -1, ltoa(T_OBJECT));
+    add_define("T_FUNCTION", -1, ltoa(T_FUNCTION));
+    add_define("T_ARRAY"   , -1, ltoa(T_POINTER));
+    add_define("T_MAPPING" , -1, ltoa(T_MAPPING));
 
     for (tmpf = lpc_predefs; tmpf; tmpf = tmpf->next) 
     {
 	char namebuf[NSIZE];
 	char mtext[MLEN];
-
+	
 	*mtext='\0';
 	(void)sscanf(tmpf->flag, "%[^=]=%[ -~=]", namebuf, mtext);
 	if (strlen(namebuf) >= NSIZE)
@@ -1415,7 +1507,7 @@ start_new_file(FILE *f)
     yyin = f;
     slast = '\n';
     lastchar = '\n';
-    inctop = 0;			/* If not here, where? */
+    inctop = 0;         /* If not here, where? */
     num_incfiles = 0;
     current_incfile = 0;
     current_line = 1;
@@ -1423,10 +1515,7 @@ start_new_file(FILE *f)
     incdepth = 0;
     nbuf = 0;
     outp = defbuf+DEFMAX;
-    pragma_strict_types = 0;		
-#ifdef BINARIES
-    pragma_save_binary = (lookup_define("SAVE_BINARIES") != 0);
-#endif
+    pragma_strict_types = 0;        
     pragma_no_inherit = pragma_no_clone = pragma_no_shadow = pragma_resident = 0;
     nexpands = 0;
 }
@@ -1477,11 +1566,12 @@ add_instr_opname_prefix(char *name, int n, int ret, int arg)
 }
 
 void 
-init_num_args()
+init_num_args(void)
 {
     int i, n;
 
-    for(i=0; i<NELEM(predefs); i++) {
+    for (i = 0; i<NELEM(predefs); i++)
+    {
 	n = predefs[i].token - EFUN_FIRST;
 	if (n < 0 || n > NELEM(instrs))
 	    fatal("Token %s has illegal value %d.\n", predefs[i].word, n);
@@ -1515,6 +1605,15 @@ init_num_args()
     add_instr_opname_prefix("~", F_COMPL, TYPE_NUMBER, T_NUMBER);
 
     add_instr_name("+=", F_ADD_EQ);
+    add_instr_name("-=", F_SUB_EQ);
+    add_instr_name("/=", F_DIV_EQ);
+    add_instr_name("*=", F_MULT_EQ);
+    add_instr_name("%=", F_MOD_EQ);
+    add_instr_name("&=", F_AND_EQ);
+    add_instr_name("|=", F_OR_EQ);
+    add_instr_name("^=", F_XOR_EQ);
+    add_instr_name("<<=", F_LSH_EQ);
+    add_instr_name(">>=", F_RSH_EQ);
     add_instr_name("push_indexed_lvalue", F_PUSH_INDEXED_LVALUE);
     add_instr_name("identifier", F_IDENTIFIER);
     add_instr_name("local", F_LOCAL_NAME);
@@ -1531,7 +1630,6 @@ init_num_args()
     add_instr_name("jump_when_non_zero", F_JUMP_WHEN_NON_ZERO);
     add_instr_name("||", F_LOR);
     add_instr_name("&&", F_LAND);
-    add_instr_name("-=", F_SUB_EQ);
     add_instr_name("jump", F_JUMP);
     add_instr_name("return", F_RETURN);
     add_instr_name("sscanf", F_SSCANF);
@@ -1545,16 +1643,19 @@ init_num_args()
     add_instr_name("aggregate", F_AGGREGATE);
     add_instr_name("m_aggregate", F_M_AGGREGATE);
     add_instr_name("push_identifier_lvalue", F_PUSH_IDENTIFIER_LVALUE);
-    add_instr_name("!=", F_NE);
     add_instr_name("dup", F_DUP);
     add_instr_name("catch", F_CATCH);
     add_instr_name("neg", F_NEGATE);
     add_instr_name("x++", F_POST_INC);
     add_instr_name("x--", F_POST_DEC);
+    add_instr_name("++x", F_INC);
+    add_instr_name("--x", F_DEC);
     add_instr_name("switch",F_SWITCH);
     add_instr_name("break",F_BREAK);
     add_instr_name("range",F_RANGE);
-    instrs[F_RANGE-EFUN_FIRST].type[0] = T_ARRAY|T_STRING;
+    add_instr_name("foreach", F_FOREACH);
+    add_instr_name("foreach", F_FOREACH_M);
+    instrs[F_RANGE-EFUN_FIRST].type[0] = T_POINTER|T_STRING;
 }
 #undef T_ANY
 
@@ -1563,7 +1664,8 @@ get_f_name(int n)
 {
     if (instrs[n-EFUN_FIRST].name)
 	return instrs[n-EFUN_FIRST].name;
-    else {
+    else
+    {
 	static char buf[30];
 	(void)sprintf(buf, "<OTHER %d>", n);
 	return buf;
@@ -1580,25 +1682,25 @@ INLINE int lookup_predef(char *s)
 #define NARGS 25
 #define MARKS '@'
 
-#define SKIPWHITE while(isspace(*p)) p++
+#define SKIPWHITE while (isspace(*p)) p++
 #define GETALPHA(p, q, m) \
-    while(isalunum(*p)) {\
-	*q = *p++;\
-	if (q < (m))\
-	    q++;\
-	else {\
-	    lexerror("Name too long");\
-	    return;\
-	}\
+    while (isalunum(*p)) {\
+    *q = *p++;\
+    if (q < (m))\
+        q++;\
+    else {\
+        lexerror("Name too long");\
+        return;\
+    }\
     }\
     *q++ = 0
 
 static int
-cmygetc()
+cmygetc(void)
 {
     int c;
 
-    for(;;)
+    for (;;)
     {
 	c = mygetc();
 	if (c == '/')
@@ -1613,13 +1715,14 @@ cmygetc()
 }
 
 static void
-refill()
+refill(void)
 {
     char *p;
     int c;
 
     p = yytext;
-    do {
+    do
+    {
 	c = cmygetc();
 	if (p < yytext+MAXLINE-5)
 	    *p++ = c;
@@ -1628,7 +1731,7 @@ refill()
 	    lexerror("Line too long");
 	    break;
 	}
-    } while(c != '\n' && c != EOF);
+    } while (c != '\n' && c != EOF);
     p[-1] = ' ';
     *p = 0;
     nexpands=0;
@@ -1648,48 +1751,63 @@ handle_define(char *yyt)
     (void)strcat(p, " ");
     q = namebuf;
     GETALPHA(p, q, namebuf+NSIZE-1);
-    if (*p == '(') {		/* if "function macro" */
+    if (*p == '(')
+    {       /* if "function macro" */
 	int arg;
 	int inid;
 	char *ids = 0;
-	p++;			/* skip '(' */
+	p++;            /* skip '(' */
 	SKIPWHITE;
-	if (*p == ')') {
+	if (*p == ')')
+	{
 	    arg = 0;
-	} else {
-	    for(arg = 0; arg < NARGS; ) {
+	}
+	else
+	{
+	    for (arg = 0; arg < NARGS; )
+	    {
 		q = args[arg];
-		GETALPHA(p, q, args[arg]+NSIZE-1);
+		GETALPHA(p, q, args[arg] + NSIZE - 1);
 		arg++;
 		SKIPWHITE;
 		if (*p == ')')
 		    break;
-		if (*p++ != ',') {
+		if (*p++ != ',')
+		{
 		    lexerror("Missing ',' in #define parameter list");
 		    return;
 		}
 		SKIPWHITE;
 	    }
-	    if (arg == NARGS) {
+	    if (arg == NARGS)
+	    {
 		lexerror("Too many macro arguments");
 		return;
 	    }
 	}
-	p++;			/* skip ')' */
-	for(inid = 0, q = mtext; *p; ) {
-	    if (isalunum(*p)) {
-		if (!inid) {
+	p++;            /* skip ')' */
+	for (inid = 0, q = mtext; *p; )
+	{
+	    if (isalunum(*p))
+	    {
+		if (!inid)
+		{
 		    inid++;
 		    ids = p;
 		}
-	    } else {
-		if (inid) {
+	    }
+	    else
+	    {
+		if (inid)
+		{
 		    size_t l, idlen = p - ids;
 		    int n;
-
-		    for(n = 0; n < arg; n++) {
+		    
+		    for (n = 0; n < arg; n++)
+		    {
 			l = strlen(args[n]);
-			if (l == idlen && strncmp(args[n], ids, l) == 0) {
+			if (l == idlen && strncmp(args[n], ids, l) == 0)
+			{
 			    q -= idlen;
 			    *q++ = MARKS;
 			    *q++ = n+MARKS+1;
@@ -1702,13 +1820,15 @@ handle_define(char *yyt)
 	    *q = *p;
 	    if (*p++ == MARKS)
 		*++q = MARKS;
-	    if (q < mtext+MLEN-2)
+	    if (q < mtext + MLEN - 2)
 		q++;
-	    else {
+	    else
+	    {
 		lexerror("Macro text too long");
 		return;
 	    }
-	    if (!*p && p[-2] == '\\') {
+	    if (!*p && p[-2] == '\\')
+	    {
 		q -= 2;
 		refill();
 		p = yytext;
@@ -1716,16 +1836,21 @@ handle_define(char *yyt)
 	}
 	*--q = 0;
 	add_define(namebuf, arg, mtext);
-    } else {
-	for(q = mtext; *p; ) {
+    }
+    else
+    {
+	for (q = mtext; *p; )
+	{
 	    *q = *p++;
-	    if (q < mtext+MLEN-2)
+	    if (q < mtext + MLEN - 2)
 		q++;
-	    else {
+	    else
+	    {
 		lexerror("Macro text too long");
 		return;
 	    }
-	    if (!*p && p[-2] == '\\') {
+	    if (!*p && p[-2] == '\\')
+	    {
 		q -= 2;
 		refill();
 		p = yytext;
@@ -1749,7 +1874,8 @@ add_input(char *p)
 {
     size_t l = strlen(p);
 
-    if (nbuf+l >= DEFMAX-10) {
+    if (nbuf+l >= DEFMAX-10)
+    {
 	lexerror("Macro expansion buffer overflow");
 	return;
     }
@@ -1758,9 +1884,21 @@ add_input(char *p)
     (void)strncpy(outp, p, l);
 }
 
-#define DEFHASH 33
+#define DEFHASH 1999
 struct defn *defns[DEFHASH];
 #define defhash(s) hashstr(s, 10, DEFHASH)
+
+void
+add_pre_define(char *define)
+{
+    struct lpc_predef_s *tmp;
+    
+    tmp = (struct lpc_predef_s *)xalloc(sizeof(struct lpc_predef_s));
+    
+    tmp->flag = string_copy(define);
+    tmp->next = lpc_predefs;
+    lpc_predefs = tmp;
+}
 
 static void
 add_define(char *name, int nargs, char *exps)
@@ -1768,8 +1906,10 @@ add_define(char *name, int nargs, char *exps)
     struct defn *p;
     int h;
 
-    if ( (p = lookup_define(name)) != NULL ) {
-	if (nargs != p->nargs || strcmp(exps, p->exps) != 0) {
+    if ((p = lookup_define(name)) != NULL)
+    {
+	if (nargs != p->nargs || strcmp(exps, p->exps) != 0)
+	{
 	    char buf[200+NSIZE];
 	    (void)sprintf(buf, "Redefinition of #define %s", name);
 	    lexerror(buf);
@@ -1786,17 +1926,19 @@ add_define(char *name, int nargs, char *exps)
     h = defhash(name);
     p->next = defns[h];
     defns[h] = p;
-/*(void)fprintf(stderr, "define '%s' %d '%s'\n", name, nargs, exps);*/
+    /*(void)fprintf(stderr, "define '%s' %d '%s'\n", name, nargs, exps);*/
 }
 
 static void
-free_defines()
+free_defines(void)
 {
     struct defn *p, *q;
     int i;
 
-    for(i = 0; i < DEFHASH; i++) {
-	for(p = defns[i]; p; p = q) {
+    for (i = 0; i < DEFHASH; i++)
+    {
+	for (p = defns[i]; p; p = q)
+	{
 	    q = p->next;
 	    free(p->name);
 	    free(p->exps);
@@ -1814,7 +1956,7 @@ lookup_define(char *s)
     int h;
 
     h = defhash(s);
-    for(p = defns[h]; p; p = p->next)
+    for (p = defns[h]; p; p = p->next)
 	if (!p->undef && strcmp(s, p->name) == 0)
 	    return p;
     return 0;
@@ -1822,13 +1964,13 @@ lookup_define(char *s)
 
 #define SKIPW \
         do {\
-	    c = cmygetc();\
-	} while(isspace(c));
+        c = cmygetc();\
+    } while (isspace(c));
 
 
 /* Check if yytext is a macro and expand if it is. */
 static int
-expand_define()
+expand_define(void)
 {
     struct defn *p;
     char expbuf[DEFMAX];
@@ -1836,55 +1978,96 @@ expand_define()
     char buf[DEFMAX];
     char *q, *e, *b;
 
-    if (nexpands++ > EXPANDMAX) {
+    if (nexpands++ > EXPANDMAX)
+    {
 	lexerror("Too many macro expansions");
 	return 0;
     }
     p = lookup_define(yytext);
-    if (!p) {
+    if (!p)
+    {
 	return 0;
     }
-    if (p->nargs == -1) {
+    if (p->nargs == -1)
+    {
 	add_input(p->exps);
-    } else {
+    }
+    else
+    {
 	int c, parcnt = 0, dquote = 0, squote = 0;
 	int n;
 	SKIPW;
-	if (c != '(') {
+	if (c != '(')
+	{
 	    lexerror("Missing '(' in macro call");
 	    return 0;
 	}
 	SKIPW;
 	if (c == ')')
 	    n = 0;
-	else {
+	else
+	{
 	    q = expbuf;
 	    args[0] = q;
-	    for(n = 0; n < NARGS; ) {
-		switch(c) {
-		case '"': if (!squote) dquote ^= 1; break;
-		case '\'': if (!dquote) squote ^= 1; break;
-		case '(': if (!squote && !dquote) parcnt++; break;
-		case ')': if (!squote && !dquote) parcnt--; break;
-		case '\\': if (squote || dquote) { *q++ = c; c = mygetc();} break;
-		case '\n': if (squote || dquote) { lexerror("Newline in string"); return 0; } break;
+	    for (n = 0; n < NARGS; )
+	    {
+		switch(c)
+		{
+		case '"':
+		    if (!squote)
+			dquote ^= 1;
+		    break;
+		case '\'':
+		    if (!dquote)
+			squote ^= 1;
+		    break;
+		case '(':
+		    if (!squote && !dquote)
+			parcnt++;
+		    break;
+		case ')':
+		    if (!squote && !dquote)
+			parcnt--;
+		    break;
+		case '\\':
+		    if (squote || dquote)
+		    {
+			*q++ = c;
+			c = mygetc();}
+		    break;
+		case '\n':
+		    if (squote || dquote)
+		    {
+			lexerror("Newline in string");
+			return 0;
+		    }
+		    break;
 		}
-		if (c == ',' && !parcnt && !dquote && !squote) {
+		if (c == ',' && !parcnt && !dquote && !squote)
+		{
 		    *q++ = 0;
 		    args[++n] = q;
-		} else if (parcnt < 0) {
+		}
+		else if (parcnt < 0)
+		{
 		    *q++ = 0;
 		    n++;
 		    break;
-		} else {
-		    if (c == EOF) {
+		}
+		else
+		{
+		    if (c == EOF)
+		    {
 			lexerror("Unexpected end of file");
 			return 0;
 		    }
-		    if (q >= expbuf + DEFMAX - 5) {
+		    if (q >= expbuf + DEFMAX - 5)
+		    {
 			lexerror("Macro argument overflow");
 			return 0;
-		    } else {
+		    }
+		    else
+		    {
 			*q++ = c;
 		    }
 		}
@@ -1893,34 +2076,44 @@ expand_define()
 		else
 		    c = mygetc();
 	    }
-	    if (n == NARGS) {
+	    if (n == NARGS)
+	    {
 		lexerror("Maximum macro argument count exceeded");
 		return 0;
 	    }
 	}
-	if (n != p->nargs) {
+	if (n != p->nargs)
+	{
 	    lexerror("Wrong number of macro arguments");
 	    return 0;
 	}
 	/* Do expansion */
 	b = buf;
 	e = p->exps;
-	while(*e) {
-	    if (*e == MARKS) {
+	while (*e)
+	{
+	    if (*e == MARKS)
+	    {
 		if (*++e == MARKS)
 		    *b++ = *e++;
-		else {
-		    for(q = args[*e++ - MARKS - 1]; *q; ) {
+		else
+		{
+		    for (q = args[*e++ - MARKS - 1]; *q; )
+		    {
 			*b++ = *q++;
-			if (b >= buf+DEFMAX) {
+			if (b >= buf+DEFMAX)
+			{
 			    lexerror("Macro expansion overflow");
 			    return 0;
 			}
 		    }
 		}
-	    } else {
+	    }
+	    else
+	    {
 		*b++ = *e++;
-		if (b >= buf+DEFMAX) {
+		if (b >= buf+DEFMAX)
+		{
 		    lexerror("Macro expansion overflow");
 		    return 0;
 		}
@@ -1935,18 +2128,17 @@ expand_define()
 /* Stuff to evaluate expression.  I havn't really checked it. /LA
 ** Written by "J\"orn Rennecke" <amylaar@cs.tu-berlin.de>
 */
-#define SKPW 	do c = mygetc(); while(isspace(c)); myungetc(c)
-
 static int
-exgetc()
+exgetc(void)
 {
-    register char c,*yyp;
+    register char c, *yyp;
     
     c = mygetc();
-    while (isalpha(c) || c=='_')
+    while (isalpha(c) || c == '_')
     {
 	yyp = yytext;
-	do {
+	do
+	{
 	    SAVEC;
 	    c = mygetc();
 	} while (isalunum(c));
@@ -1958,7 +2150,7 @@ exgetc()
 	    do
 		c = mygetc();
 	    while (isspace(c));
-
+	    
 	    if (c != '(')
 	    {
 		lexerror("Missing ( in defined");
@@ -1966,8 +2158,8 @@ exgetc()
 	    }
 	    do
 		c = mygetc();
-	    while(isspace(c));
-
+	    while (isspace(c));
+	    
 	    yyp = yytext;
 	    while (isalunum(c))
 	    {
@@ -1975,14 +2167,20 @@ exgetc()
 		c = mygetc();
 	    }
 	    *yyp = '\0';
-	    while(isspace(c))
+	    while (isspace(c))
 		c = mygetc();
 	    if (c != ')')
 	    {
 		lexerror("Missing ) in defined");
 		continue;
 	    }
-	    SKPW;
+
+	    /* Skip whitespace */
+	    do
+		c = mygetc();
+	    while (isspace(c)); 
+	    myungetc(c);
+
 	    if (lookup_define(yytext))
 		add_input(" 1 ");
 	    else
@@ -1993,8 +2191,8 @@ exgetc()
 	    if (!expand_define()) add_input(" 0 ");
 	}
 	c = mygetc();
-  }
-  return c;
+    }
+    return c;
 }
 
 #define BNOT   1
@@ -2032,7 +2230,6 @@ static char optab2[]=
 0,'<',LSHIFT,9,'=',LEQ,8,0,LESS,8,0,'>',RSHIFT,9,'=',GEQ,8,0,GREAT,8,
 0,'=',EQ,7,0,0,0,'&',LAND,3,0,BAND,6,0,'|',LOR,2,0,BOR,4,
 0,0,XOR,5,0,0,QMARK,1};
-#define optab1 (_optab-' ')
 
 static int 
 cond_get_exp(int priority)
@@ -2059,7 +2256,7 @@ cond_get_exp(int priority)
     }
     else if (ispunct(c))
     {
-	x = optab1[c];
+	x = (_optab-' ')[c];
 	if (!x)
 	{
 	    lexerror("illegal character in #if");
@@ -2106,7 +2303,7 @@ cond_get_exp(int priority)
 	    else
 		base=8;
 	}
-	for(;;)
+	for (;;)
 	{
 	    if ( isdigit(c) )
 		x = -'0';
@@ -2132,11 +2329,11 @@ cond_get_exp(int priority)
 	
 	if (!ispunct(c))
 	    break;
-	x = optab1[c];
+	x = (_optab-' ')[c];
 	if (!x)
 	    break;
 	value2 = mygetc();
-	for(;;x += 3)
+	for (;;x += 3)
 	{
 	    if (!optab2[x])
 	    {
@@ -2160,28 +2357,28 @@ cond_get_exp(int priority)
 	value2 = cond_get_exp(optab2[x + 2]);
 	switch ( optab2[x + 1] )
 	{
-	case MULT : value *= value2;	break;
-	case DIV  : value /= value2;	break;
-	case MOD  : value %= value2;	break;
-	case BPLUS  : value += value2;	break;
-	case BMINUS : value -= value2;	break;
-	case LSHIFT : value <<= value2;	break;
-	case RSHIFT : value = (unsigned)value >> value2; break;
-	case LESS   : value = value <  value2;	break;
-	case LEQ    : value = value <= value2;	break;
-	case GREAT  : value = value >  value2;	break;
-	case GEQ    : value = value >= value2;	break;
-	case EQ     : value = value == value2;	break;
-	case NEQ    : value = value != value2;	break;
-	case BAND   : value &= value2;	break;
-	case XOR    : value ^= value2;	break;
-	case BOR    : value |= value2;	break;
-	case LAND   : value = value && value2;	break;
-	case LOR    : value = value || value2;	break;
+	case MULT   : value *=  value2;                    break;
+	case DIV    : value /=  value2;                    break;
+	case MOD    : value %=  value2;                    break;
+	case BPLUS  : value +=  value2;                    break;
+	case BMINUS : value -=  value2;                    break;
+	case LSHIFT : value <<= value2;                    break;
+	case RSHIFT : value =   (unsigned)value >> value2; break;
+	case LESS   : value =   value <  value2;           break;
+	case LEQ    : value =   value <= value2;           break;
+	case GREAT  : value =   value >  value2;           break;
+	case GEQ    : value =   value >= value2;           break;
+	case EQ     : value =   value == value2;           break;
+	case NEQ    : value =   value != value2;           break;
+	case BAND   : value &=  value2;                    break;
+	case XOR    : value ^=  value2;                    break;
+	case BOR    : value |=  value2;                    break;
+	case LAND   : value =  value && value2;            break;
+	case LOR    : value =  value || value2;            break;
 	case QMARK  :
 	    do
 		c = exgetc();
-	    while(isspace(c));
+	    while (isspace(c));
             if (c != ':')
 	    {
 		lexerror("'?' without ':' in #if");
@@ -2193,7 +2390,8 @@ cond_get_exp(int priority)
 		(void)cond_get_exp(1);
 		value = value2;
 	    }
-	    else value = cond_get_exp(1);
+	    else
+		value = cond_get_exp(1);
 	    break;
 	}
     }
@@ -2201,46 +2399,61 @@ cond_get_exp(int priority)
     return value;
 }
 
-#ifdef DEALLOCATE_MEMORY_AT_SHUTDOWN
+/* Free the global list of include directories.
+ */
 void
-free_inc_list()
+free_inc_list(void)
 {
     int i;
 
     for (i = 0; i < inc_list_size; i++)
-	free_sstring(inc_list[i]);
-    free(inc_list);
-}
-#endif
+	free(inc_list[i]);
+    if (inc_list)
+	free(inc_list);
 
+}
+
+/* Set the global list of include directories.
+   Affects globals inc_list and inc_list_size */
 void 
 set_inc_list(struct svalue *sv)
 {
     int i;
     struct vector *v;
-    char *p;
+    char *p, *end;
+    char **tmp_inc_list;
     
+    free_inc_list();
     if (sv == 0)
     {
-	(void)fprintf(stderr, "There must be a function 'define_include_dirs' in master.c.\n");
-	(void)fprintf(stderr, "This function should return an array of all directories to be searched\n");
-	(void)fprintf(stderr, "for include files.\n");
-	exit(1);
+	inc_list_size = 0;
+	inc_list = NULL;
+	return;
     }
-    if (sv->type != T_ARRAY)
+    if (sv->type != T_POINTER)
     {
 	(void)fprintf(stderr, "'define_include_dirs' in master.c did not return an array.\n");
 	exit(1);
+	inc_list_size = 0;
+	inc_list = NULL;
+	return;
     }
     v = sv->u.vec;
-    inc_list = (char **) xalloc(v->size * sizeof (char *));
-    inc_list_size = v->size;
+    if (v->size == 0) {
+	(void)fprintf(stderr, "'define_include_dirs' returned an empty array\n");
+	inc_list_size = 0;
+	inc_list = NULL;
+	return;
+    }
+
+    tmp_inc_list = (char **) xalloc(v->size * sizeof (char *));
+    inc_list_size = 0;
     for (i = 0; i < v->size; i++)
     {
 	if (v->item[i].type != T_STRING)
 	{
 	    (void)fprintf(stderr, "Illegal value returned from 'define_include_dirs' in master.c\n");
-	    exit(1);
+	    continue;
 	}
 	p = v->item[i].u.string;
 	if (*p == '/')
@@ -2251,8 +2464,36 @@ set_inc_list(struct svalue *sv)
 	if (!legal_path(p))
 	{
 	    (void)fprintf(stderr, "'define_include_dirs' must give paths without any '..'\n");
-	    exit(1);
+	    continue;
 	}
-	inc_list[i] = make_sstring(p);
+	if ((end = strstr(p, "%s"))) {
+	    if (end != p + strlen(p) - 2) {
+		(void)fprintf(stderr, "'define_include_dirs' may only contain %%s last.");
+		continue;
+	    }
+	}
+	else
+	    end = p + strlen(p);
+	if (end != p && end[-1] != '/') {
+	    tmp_inc_list[inc_list_size] = xalloc(end - p + 2);
+	    strncpy(tmp_inc_list[inc_list_size], p, end - p);
+	    tmp_inc_list[inc_list_size][end - p] = '/';
+	    tmp_inc_list[inc_list_size][end - p + 1] = '\0';
+	} else {
+	    tmp_inc_list[inc_list_size] = xalloc(end - p + 1);
+	    strncpy(tmp_inc_list[inc_list_size], p, end - p);
+	    tmp_inc_list[inc_list_size][end - p] = '\0';
+	}
+	inc_list_size++;
     }
+    if (inc_list_size == 0) {
+	inc_list = NULL;
+	free(tmp_inc_list);
+    } else if (inc_list_size != v->size) {
+	inc_list = (char **) xalloc(inc_list_size * sizeof (char *));
+	for (i = 0; i < inc_list_size; i++)
+	    inc_list[i] = tmp_inc_list[i];
+	free(tmp_inc_list);
+    } else
+	inc_list = tmp_inc_list;
 }

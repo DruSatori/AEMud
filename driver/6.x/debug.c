@@ -5,7 +5,6 @@
   debug switches are managed from here.
 
 */
-#include <stdarg.h>
 #include <stdio.h>
 #include <string.h>
 #include <ctype.h>
@@ -14,32 +13,30 @@
 #include <sys/stat.h>
 /* #include <netinet/in.h> Included in comm.h below */
 #include <memory.h>
+#include <float.h> 			/* limits.h has been removed by most platforms    */
+							/*    this change also requires changing          */
+							/*    MAXDOUBLE to DBL_MAX                        */
+#include <math.h>
 
 #include "config.h"
 #include "lint.h"
 #include "mstring.h"
 #include "exec.h"
 #include "interpret.h"
-#include "swap.h"
 #include "udpsvc.h"
+#include "call_out.h"
 
 #ifdef RUSAGE			/* Defined in config.h */
-#ifdef SOLARIS
-#include <sys/times.h>
-#include <limits.h>
-#else
 #include <sys/resource.h>
 extern int getrusage (int, struct rusage *);
-#ifdef sun
-extern int getpagesize (void);
-#endif
 #ifndef RUSAGE_SELF
 #define RUSAGE_SELF	0
 #endif
-#endif /* SOLARIS */
-#ifdef PROFILE_OBJS
-static struct vector *make_cpu_array (int,struct program *[]); 
 #endif
+
+#if defined(PROFILE_LPC)
+static struct vector *make_cpu_array (int,struct program *[]); 
+static struct vector *make_cpu_array2 (int,struct program *[]); 
 #endif
 
 
@@ -56,7 +53,9 @@ static struct vector *make_cpu_array (int,struct program *[]);
 
 #include "inline_svalue.h"
 
-#define DUMP_FILE "OBJECT_DUMP"
+#define OBJECT_DUMP_FILE "OBJECT_DUMP"
+#define ALARM_DUMP_FILE  "ALARM_DUMP"
+#define TRACE_CALLS_FILE  "TRACE_CALLS"
 
 int call_warnings;
 
@@ -111,6 +110,13 @@ static	char	*debc[] = { "index",		/* 0 */
 			    "inhibitcallouts",  /* 42       on/off */
 			    "warnobsolete",     /* 43       on/off */
 			    "shared_strings",	/* 44 */
+                            "dump_alarms",      /* 45 */
+                            "top_ten_cpu_avg",  /* 46 */
+                            "object_cpu_avg",   /* 47 */
+                            "getprofile_avg",   /* 48 */
+                            "profile_timebase", /* 49 */
+			    "trace_calls",      /* 50 */
+			    "top_functions",    /* 51 */
 			    0
 			  };
 
@@ -121,6 +127,11 @@ void dumpfuncs(void);
 #ifdef OPCPROF
 void opcdump(void);
 #endif
+
+extern struct program *prog_list;
+static double get_top_func_criteria(struct function *func, int criteria);
+static void mem_variables(FILE *f, struct object *ob);
+    
 
 struct svalue *
 debug_command(char *debcmd, int argc, struct svalue *argv)
@@ -143,7 +154,7 @@ debug_command(char *debcmd, int argc, struct svalue *argv)
     switch (dbi)
     {
     case 0: /* index */
-	retval.type = T_ARRAY;
+	retval.type = T_POINTER;
 	retval.u.vec = allocate_array(dbnum);
 	for (il = 0; il < dbnum; il++)
 	{
@@ -181,10 +192,7 @@ debug_command(char *debcmd, int argc, struct svalue *argv)
     case 5: /* functionlist object */
 	if (argc < 1 || argv[0].type != T_OBJECT)
 	    break;
-#ifdef USE_SWAP
-	access_program(argv->u.ob->prog);
-#endif
-	retval.type = T_ARRAY;
+	retval.type = T_POINTER;
 	retval.u.vec = allocate_array(argv[0].u.ob->prog->num_functions);
 	for (il = 0; il < (int)argv[0].u.ob->prog->num_functions; il++)
 	{
@@ -193,23 +201,11 @@ debug_command(char *debcmd, int argc, struct svalue *argv)
 	    retval.u.vec->item[il].u.string = 
 		reference_sstring(argv[0].u.ob->prog->functions[il].name);
 	}
-#ifdef USE_SWAP
-	access_program(current_prog);
-#endif
 	return &retval;
-#ifdef RUSAGE /* Only defined if we compile GD with RUSAGE */
     case 6: /* rusage */
     {
+#ifdef RUSAGE /* Only defined if we compile GD with RUSAGE */
 	char buff[500];
-#ifdef SOLARIS
-	struct tms buffer;
-
-	if (times(&buffer) == -1)
-	    buff[0] = 0;
-	else
-	    (void)sprintf(buff, "%ld %ld (s/%ld)",
-		    buffer.tms_utime, buffer.tms_stime, CLK_TCK);
-#else
 	struct rusage rus;
 	long utime, stime;
 	long maxrss;
@@ -220,9 +216,6 @@ debug_command(char *debcmd, int argc, struct svalue *argv)
 	    utime = rus.ru_utime.tv_sec * 1000 + rus.ru_utime.tv_usec / 1000;
 	    stime = rus.ru_stime.tv_sec * 1000 + rus.ru_stime.tv_usec / 1000;
 	    maxrss = rus.ru_maxrss;
-#ifdef sun
-	    maxrss *= getpagesize() / 1024;
-#endif
 	    (void)sprintf(buff, "%ld %ld %ld %ld %ld %ld %ld %ld %ld %ld %ld %ld %ld %ld %ld %ld",
 		    utime, stime, maxrss, rus.ru_ixrss, rus.ru_idrss,
 		    rus.ru_isrss, rus.ru_minflt, rus.ru_majflt, rus.ru_nswap,
@@ -230,37 +223,40 @@ debug_command(char *debcmd, int argc, struct svalue *argv)
 		    rus.ru_msgrcv, rus.ru_nsignals, rus.ru_nvcsw, 
 		    rus.ru_nivcsw);
 	}
-#endif /* SOLARIS */
 	retval.type = T_STRING;
 	retval.string_type = STRING_MSTRING;
 	retval.u.string = make_mstring(buff);
 	return &retval;
+#else
+	retval.type = T_STRING;
+	retval.string_type = STRING_CSTRING;
+	retval.u.string = "Only valid if GD compiled with RUSAGE flag.\n";
+	return &retval;
+#endif
     }
-#ifdef PROFILE_OBJS
+
+#if defined(PROFILE_LPC)
     case 7: /* top_ten_cpu */
     {
-#define NUMBER_OF_TOP_TEN 10
+#define NUMBER_OF_TOP_TEN 100
 	struct program *p[NUMBER_OF_TOP_TEN];
-	struct object *ob; 
 	struct vector *v;
+	struct program *prog;
 	int i, j;
 	for(i = 0; i < NUMBER_OF_TOP_TEN; i++) 
 	    p[i] = (struct program *)0L;
-	ob = obj_list;
+	prog = prog_list;
 	do
 	{
-	    if (!ob->prog)  /* That this case exists is just weird /JnA */
-		continue;
-
 	    for(i = NUMBER_OF_TOP_TEN-1; i >= 0; i--) 
 	    {
-		if ( p[i] && (ob->prog->cpu <= p[i]->cpu))
+		if ( p[i] && (prog->cpu <= p[i]->cpu))
 		    break;
 	    }
 
 	    if (i < (NUMBER_OF_TOP_TEN - 1)) 
 		for (j = 0; j <= i; j++)
-		    if (strcmp(p[j]->name,ob->prog->name) == 0)
+		    if (strcmp(p[j]->name,prog->name) == 0)
 		    {
 			i = NUMBER_OF_TOP_TEN-1;
 			break;
@@ -274,13 +270,13 @@ debug_command(char *debcmd, int argc, struct svalue *argv)
 		    p[j + 1] = p[j];
 		    j--;
 		}
-		p[i + 1] = ob->prog;
+		p[i + 1] = prog;
 	    }
-	} while (obj_list != (ob = ob->next_all));
+	} while (prog_list != (prog = prog->next_all));
 	v = make_cpu_array(NUMBER_OF_TOP_TEN, p);        
 	if (v) 
 	{                                                   
-	    retval.type = T_ARRAY;
+	    retval.type = T_POINTER;
 	    retval.u.vec = v;
 	    return &retval;
 	}
@@ -291,35 +287,27 @@ debug_command(char *debcmd, int argc, struct svalue *argv)
     case 7:
 	retval.type = T_STRING;
 	retval.string_type = STRING_CSTRING;
-	retval.u.string = "Only valid if GD compiled with PROFILE_OBJS flag.\n";
+	retval.u.string = "Only valid if GD compiled with PROFILE_LPC flag.\n";
 	return &retval;
 #endif
     case 8: /* object_cpu object */
     {
-	int c_num;
+	long long c_num;
 
 	if (argc && (argv[0].type == T_OBJECT)) 
 	{
-#ifdef PROFILE_OBJS
-	    long cpu = argv[0].u.ob->prog->cpu;
-	    c_num = (int)cpu;
+#if defined(PROFILE_LPC)
+	    c_num = argv[0].u.ob->prog->cpu * 1e6;
 #else
 	    retval.type = T_STRING;
 	    retval.string_type = STRING_CSTRING;
-	    retval.u.string = "Only valid if GD compiled with PROFILE_OBJS flag.\n";
+	    retval.u.string = "Only valid if GD compiled with PROFILE_LPC flag.\n";
 	    return &retval;
 #endif
 	} 
 	else 
 	{
-#ifdef SOLARIS
-	    struct tms buffer;
-	    
-	    if (times(&buffer) == -1)
-		c_num = -1;
-	    else
-		c_num = buffer.tms_utime + buffer.tms_stime;
-#else
+#ifdef RUSAGE
 	    struct rusage rus;         
 
 	    if (getrusage(RUSAGE_SELF, &rus) < 0) 
@@ -328,26 +316,22 @@ debug_command(char *debcmd, int argc, struct svalue *argv)
 	    }
 	    else 
 	    {                                                               
-		c_num =  (int)(rus.ru_utime.tv_sec * 1000 + 
-			       rus.ru_utime.tv_usec / 1000 +
-			       rus.ru_stime.tv_sec * 1000 + 
-			       rus.ru_stime.tv_usec / 1000);
+		c_num =  (long long)rus.ru_utime.tv_sec * 1000000 + 
+				     rus.ru_utime.tv_usec +
+				     (long long)rus.ru_stime.tv_sec * 1000000 + 
+				     rus.ru_stime.tv_usec;
 	    }
+#else
+	retval.type = T_STRING;
+	retval.string_type = STRING_CSTRING;
+	retval.u.string = "Only valid if GD compiled with RUSAGE flag.\n";
+	return &retval;
 #endif
         }
 	retval.type = T_NUMBER;
 	retval.u.number = c_num;
 	return &retval;
     }
-#else /* RUSAGE */
-    case 6:
-    case 7: /* rusage, top_ten_cpu and object_cpu */
-    case 8:
-	retval.type = T_STRING;
-	retval.string_type = STRING_CSTRING;
-	retval.u.string = "Only valid if GD compiled with RUSAGE flag.\n";
-	return &retval;
-#endif /* RUSAGE */
     
     case 9:  /*	swap,		object 		*/
 #if 0        /* can not swap while executing */
@@ -358,8 +342,8 @@ debug_command(char *debcmd, int argc, struct svalue *argv)
 	return &retval;
     case 10: /*	version,		  	*/
     {
-	char buff[9];
-	(void)sprintf(buff, "%6.6s%02d", GAME_VERSION, PATCH_LEVEL);
+	char buff[64];
+	(void)snprintf(buff, sizeof(buff), "%6.6s%02d %s %s", GAME_VERSION, PATCH_LEVEL, __DATE__, __TIME__);
 	retval.type = T_STRING;
 	retval.string_type = STRING_MSTRING;
 	retval.u.string = make_mstring(buff);
@@ -424,14 +408,14 @@ debug_command(char *debcmd, int argc, struct svalue *argv)
 	    extern struct vector *get_calls(struct object *);
 	    if (argv[0].type != T_OBJECT)
 		break;
-	    retval.type = T_ARRAY;
+	    retval.type = T_POINTER;
 	    retval.u.vec =  get_calls(argv[0].u.ob);
 	    return &retval;
 	}
     case 15: /* inherit_list, 	object		*/
 	if (argc && (argv[0].type == T_OBJECT))
 	{
-	    retval.type = T_ARRAY;
+	    retval.type = T_POINTER;
 	    retval.u.vec = inherit_list(argv[0].u.ob);
 	    return &retval;
 	}
@@ -487,10 +471,10 @@ debug_command(char *debcmd, int argc, struct svalue *argv)
 #endif
 	    (void)sprintf(tdb,"swap_num    : %d\n", ob->swap_num);
 	    (void)strcat(db_buff, tdb);
-	    (void)sprintf(tdb,"name        : '%s'\n", ob->name);
+	    (void)snprintf(tdb, sizeof(tdb), "name        : '%s'\n", ob->name);
 	    (void)strcat(db_buff, tdb);
-	    (void)sprintf(tdb,"next_all    : OBJ(%s)\n",
-			ob->next_all?ob->next_all->name:"NULL");
+	    (void)snprintf(tdb, sizeof(tdb), "next_all    : OBJ(%s)\n",
+			ob->next_all?ob->next_all->name: "NULL");
 	    (void)strcat(db_buff, tdb);
 	    if (obj_list == ob) 
 	    {
@@ -502,7 +486,7 @@ debug_command(char *debcmd, int argc, struct svalue *argv)
 	    do
 		if (obj2->next_all == ob) 
 		{
-		    (void)sprintf(tdb,"Previous object in object list: OBJ(%s)\n",
+		    (void)snprintf(tdb, sizeof(tdb), "Previous object in object list: OBJ(%s)\n",
 			    obj2->name);
 		    (void)strcat(db_buff, tdb);
 		    (void)sprintf(tdb, "position in object list:%d\n",i);
@@ -518,7 +502,7 @@ debug_command(char *debcmd, int argc, struct svalue *argv)
 	    ob = argv[1].u.ob;
 	    
 	    (void)sprintf(db_buff,"program ref's %d\n", ob->prog->ref);
-	    (void)sprintf(tdb,"Name %s\n", ob->prog->name);
+	    (void)snprintf(tdb, sizeof(tdb), "Name %s\n", ob->prog->name);
 	    (void)strcat(db_buff, tdb);
 	    (void)sprintf(tdb,"program size %d\n", ob->prog->program_size);
 	    (void)strcat(db_buff, tdb);
@@ -538,7 +522,7 @@ debug_command(char *debcmd, int argc, struct svalue *argv)
 	}
         else
 	{
-	    (void)sprintf(db_buff, "Bad number argument to object_info: %d\n",
+	    (void)sprintf(db_buff, "Bad number argument to object_info: %lld\n",
 		    argv[0].u.number);
         }
 	retval.type = T_STRING;
@@ -561,15 +545,16 @@ debug_command(char *debcmd, int argc, struct svalue *argv)
     }
     case 20: /* send_udp,	20     		host, port, msg */
     {
-	int tmp;
-
+#ifdef CATCH_UDP_PORT
+	extern udpsvc_t *udpsvc;
+#endif
 	if (argc < 3 || 
 	    argv[0].type != T_STRING ||
 	    argv[1].type != T_NUMBER ||
 	    argv[2].type != T_STRING)
 	    break;
 #ifdef CATCH_UDP_PORT
-	tmp = udpsvc_send(argv[0].u.string, argv[1].u.number, argv[2].u.string);
+	tmp = udpsvc_send(udpsvc, argv[0].u.string, argv[1].u.number, argv[2].u.string);
 	if (tmp)
 	    retval = const1;
 	else
@@ -669,42 +654,76 @@ debug_command(char *debcmd, int argc, struct svalue *argv)
 
     case 27: /* debug malloc, 27 */
     {
-#ifdef DEBUG_MALLOC
-        debug_malloc();
-#endif
         retval = const1;
         return &retval;
     }    
     case 28: /* getprofile, 28	object */
     {
-#ifndef PROFILE_FUNS
+        int format = 0;
+#ifndef PROFILE_LPC
 	retval.type = T_STRING;
 	retval.string_type = STRING_CSTRING;
-	retval.u.string = "Only valid if GD compiled with PROFILE_FUNS flag.\n";
+	retval.u.string = "Only valid if GD compiled with PROFILE_LPC flag.\n";
 	return &retval;
 #else
 	if (argc < 1 || argv[0].type != T_OBJECT)
 	    break;
-	retval.type = T_ARRAY;
-	retval.u.vec = allocate_array(argv[0].u.ob->prog->num_functions);
-#ifdef USE_SWAP
-	access_program(argv[0].u.ob->prog);
-#endif
-	for (il = 0; il < (int)argv[0].u.ob->prog->num_functions; il++)
-	{
-	    char buff[200]; /* I know longer funnames crashes the GD... */
+        if (argc >= 2 && argv[1].type == T_NUMBER)
+            format = argv[1].u.number;
+        if (format == 0) {
+	    retval.type = T_POINTER;
+	    retval.u.vec = allocate_array(argv[0].u.ob->prog->num_functions);
+	    for (il = 0; il < (int)argv[0].u.ob->prog->num_functions; il++)
+	    {
+	        char buff[200]; 
 
-	    (void)sprintf(buff, "%09d:%09ld: %s",
-		    argv[0].u.ob->prog->functions[il].num_calls,
-		    argv[0].u.ob->prog->functions[il].time_spent / 100,
-		    argv[0].u.ob->prog->functions[il].name);
-	    retval.u.vec->item[il].type = T_STRING;
-	    retval.u.vec->item[il].string_type = STRING_MSTRING;
-	    retval.u.vec->item[il].u.string = make_mstring(buff);
-	}
-#ifdef USE_SWAP
-	access_program(current_prog);
-#endif
+	        (void)snprintf(buff, sizeof(buff), "%016lld:%020lld: %s",
+		        (long long)argv[0].u.ob->prog->functions[il].num_calls,
+		        (long long)(argv[0].u.ob->prog->functions[il].time_spent * 1e6),
+		        argv[0].u.ob->prog->functions[il].name);
+	        retval.u.vec->item[il].type = T_STRING;
+	        retval.u.vec->item[il].string_type = STRING_MSTRING;
+	        retval.u.vec->item[il].u.string = make_mstring(buff);
+	    }
+        } else if (format == 1) {
+            retval.type = T_POINTER;
+            retval.u.vec = allocate_array(argv[0].u.ob->prog->num_functions);
+            double now = current_cpu();
+            struct program *prog = argv[0].u.ob->prog;
+	    for (il = 0; il < (int)prog->num_functions; il++)
+	    {
+                struct function *func = prog->functions + il;
+	        struct vector *res = allocate_array(7);
+                update_func_profile(func, now, 0.0, 0.0, 0);
+                res->item[0].type = T_STRING;
+                res->item[0].string_type = STRING_MSTRING;
+                res->item[0].u.string = make_mstring(func->name);
+             
+                res->item[1].type = T_FLOAT;
+                res->item[1].u.real = func->time_spent * 1e6;
+    
+                res->item[2].type = T_FLOAT;
+                res->item[2].u.real = func->tot_time_spent * 1e6;
+    
+                res->item[3].type = T_FLOAT;
+                res->item[3].u.real = func->num_calls;
+                res->item[4].type = T_FLOAT;
+                res->item[4].u.real = func->avg_time * 1e6;
+    
+                res->item[5].type = T_FLOAT;
+                res->item[5].u.real = func->avg_tot_time * 1e6;
+    
+                res->item[6].type = T_FLOAT;
+                res->item[6].u.real = func->avg_calls;
+
+	        retval.u.vec->item[il].type = T_POINTER;
+	        retval.u.vec->item[il].u.vec = res;
+            }
+        } else {
+	    retval.type = T_STRING;
+	    retval.string_type = STRING_CSTRING;
+	    retval.u.string = "Unknown format.\n";
+        }
 	return &retval;
 #endif
     }
@@ -771,44 +790,22 @@ debug_command(char *debcmd, int argc, struct svalue *argv)
     case 34: /* dump objects */
     {
 	FILE *ufile;
-	char *mem_variables(struct object *);
-	struct object *ob, *nob;
-	char line[255];      
+	struct object *ob;
        
-	if ((ufile = fopen(DUMP_FILE, "w")) == NULL)
+	if ((ufile = fopen(OBJECT_DUMP_FILE, "w")) == NULL)
 	{
 	    retval.type = T_NUMBER;
 	    retval.u.number = -1;
 	    return &retval;
 	}
        
+	fputs("Array (size), Mapping (size), String (size), Objs, Ints, Floats, Inventory, Callouts, Environment, Name\n", ufile);
 	ob = obj_list;
 	do
 	{
-	    if (ob)
-	    {
-		extern int num_call_outs(struct object *);
-		int num_co, num_inv;
-		struct object *o;
-
-		num_co = num_call_outs(ob);
-
-		for (num_inv = 0, o = ob->contains; o;
-		     num_inv++, o = o->next_inv) ;
-
-		(void)sprintf(line, "%s %s in %s callouts %d inventory %d\n",
-			mem_variables(ob), ob->name,
-			ob->super ? ob->super->name : "(void)",
-			num_co, num_inv);
-	    }
-	    if (fputs(line, ufile) < 0)
-	    {
-		(void)fclose(ufile);
-		break;
-	    }
-	    nob = ob->next_all;
+	    mem_variables(ufile, ob);
 	}
-	while (obj_list != (ob = nob));
+	while (obj_list != (ob = ob->next_all));
 	(void)fclose(ufile);
 	break;
     }
@@ -827,158 +824,15 @@ debug_command(char *debcmd, int argc, struct svalue *argv)
 	return &retval;
 	
     case 37: /* set_swap */
-#ifdef USE_SWAP
-	{
-	    extern int max_swap_memory;
-	    extern int min_swap_memory;
-	    extern int min_swap_time;
-	    extern int max_swap_time;
-	    struct vector *v;
-	    
-	    if (!argc || argv[0].type != T_ARRAY ||
-		argv[0].u.vec->size != 4)
-		break;
-	    v = argv[0].u.vec;
-	    if (v->item[0].type != T_NUMBER ||
-		v->item[0].u.number < 0) 
-		break; /* Too low min_swap_memory */
-	    
-	    if (v->item[1].type != T_NUMBER ||
-		v->item[1].u.number < v->item[0].u.number)
-		break;
-	    
-	    if (v->item[2].type != T_NUMBER ||
-		v->item[2].u.number < 0)
-		break;
-	    
-	    if (v->item[3].type != T_NUMBER ||
-		v->item[3].u.number < v->item[2].u.number)
-		break;
-	    min_swap_memory = v->item[0].u.number;
-	    max_swap_memory = v->item[1].u.number;
-	    min_swap_time = v->item[2].u.number;
-	    max_swap_time = v->item[3].u.number;
-	    retval.type = T_NUMBER;
-	    retval.u.number = 1;
-	    return &retval;
-	}
-#else
-	retval.type = T_STRING;
+      retval.type = T_STRING;
 	retval.string_type = STRING_CSTRING;
-	retval.u.string = "Only valid if GD compiled with USE_SWAP flag.\n";
+	retval.u.string = "Obsolete function.\n";
 	return &retval;
-#endif
-	
     case 38: /* query_swap */
-#ifdef USE_SWAP
-	{
-	    if (argc == 0 || (argv[0].type == T_NUMBER && argv[0].u.number == 0))
-	    {
-		extern int max_swap_memory;
-		extern int min_swap_memory;
-		extern int min_swap_time;
-		extern int max_swap_time;
-		struct vector *v;
-		
-		v = allocate_array(4);
-		v->item[0].type = T_NUMBER;
-		v->item[0].u.number = min_swap_memory;
-		v->item[1].type = T_NUMBER;
-		v->item[1].u.number = max_swap_memory;
-		v->item[2].type = T_NUMBER;
-		v->item[2].u.number = min_swap_time;
-		v->item[3].type = T_NUMBER;
-		v->item[3].u.number = max_swap_time;
-		
-		retval.type = T_ARRAY;
-		retval.u.vec = v;
-		return &retval;
-	    }
-	    else if (argv[0].type == T_NUMBER)
-	    {
-		extern int used_memory;
-		extern int swap_out_obj_sec, swap_out_obj_min;
-		extern int swap_out_prog_sec, swap_out_prog_min;
-		extern int swap_in_obj_sec, swap_in_obj_min;
-		extern int swap_in_prog_sec, swap_in_prog_min;
-		extern int swap_out_obj_hour, swap_in_obj_hour;
-		extern int swap_out_prog_hour, swap_in_prog_hour;
-		extern struct object *swap_ob;
-		extern struct program *swap_prog;
-
-		switch(argv[0].u.number)
-		{
-		case 1:
-		    {
-			struct vector *v, *v0;
-			
-			v = allocate_array(4);
-			
-			v0 = allocate_array(3);
-			v0->item[0].type = T_NUMBER;
-			v0->item[0].u.number = swap_in_obj_sec;
-			v0->item[1].type = T_NUMBER;
-			v0->item[1].u.number = swap_in_obj_min;
-			v0->item[2].type = T_NUMBER;
-			v0->item[2].u.number = swap_in_obj_hour;
-			v->item[0].type = T_ARRAY;
-			v->item[0].u.vec = v0;
-			
-			v0 = allocate_array(3);
-			v0->item[0].type = T_NUMBER;
-			v0->item[0].u.number = swap_in_prog_sec;
-			v0->item[1].type = T_NUMBER;
-			v0->item[1].u.number = swap_in_prog_min;
-			v0->item[2].type = T_NUMBER;
-			v0->item[2].u.number = swap_in_prog_hour;
-			v->item[1].type = T_ARRAY;
-			v->item[1].u.vec = v0;
-			
-			v0 = allocate_array(3);
-			v0->item[0].type = T_NUMBER;
-			v0->item[0].u.number = swap_out_obj_sec;
-			v0->item[1].type = T_NUMBER;
-			v0->item[1].u.number = swap_out_obj_min;
-			v0->item[2].type = T_NUMBER;
-			v0->item[2].u.number = swap_out_obj_hour;
-			v->item[2].type = T_ARRAY;
-			v->item[2].u.vec = v0;
-			
-			v0 = allocate_array(3);
-			v0->item[0].type = T_NUMBER;
-			v0->item[0].u.number = swap_out_prog_sec;
-			v0->item[1].type = T_NUMBER;
-			v0->item[1].u.number = swap_out_prog_min;
-			v0->item[2].type = T_NUMBER;
-			v0->item[2].u.number = swap_out_prog_hour;
-			v->item[3].type = T_ARRAY;
-			v->item[3].u.vec = v0;
-			
-			retval.type = T_ARRAY;
-			retval.u.vec = v;
-			return &retval;
-		    }
-		case 2:
-		    retval.type = T_NUMBER;
-		    retval.u.number =
-			(swap_prog->time_of_ref < swap_ob->time_of_ref ?
-			 swap_prog->time_of_ref :
-			 swap_prog->time_of_ref);
-		    return &retval;
-		case 3:
-		    retval.type = T_NUMBER;
-		    retval.u.number = used_memory;
-		    return &retval;
-		}    
-	    }
-	    break;
-	}		
-#else
 	retval.type = T_STRING;
 	retval.string_type = STRING_CSTRING;
-	retval.u.string = "Only valid if GD compiled with USE_SWAP flag.\n";
+	retval.u.string = "Obsolete function.\n";
 	return &retval;
-#endif
     case 39: /* query_debug_prog */
 	if (!argc || argv[0].type != T_OBJECT)
 	    break;
@@ -1050,12 +904,363 @@ debug_command(char *debcmd, int argc, struct svalue *argv)
 	retval.u.string = "Only valid if GD compiled with DEBUG flag.\n";
 #endif
 	return &retval;
+    case 45: /* dump_alarms */
+        {
+            int c;
+            FILE *ufile;
+            
+            if ((ufile = fopen(ALARM_DUMP_FILE, "w")) == NULL)
+            {
+                retval.type = T_NUMBER;
+                retval.u.number = -1;
+                return &retval;
+            }
+            
+            c = dump_callouts(ufile);
+            fclose(ufile);
+            
+            retval.type = T_NUMBER;
+            retval.u.number = c;
+            return &retval;
+        }
+
+#ifdef PROFILE_LPC
+    case 46: /* top_ten_cpu */
+    {
+#define NUMBER_OF_TOP_TEN 100
+	struct program *p[NUMBER_OF_TOP_TEN];
+	struct program *prog; 
+	struct vector *v;
+	int i, j;
+        double now = current_cpu();
+
+	for(i = 0; i < NUMBER_OF_TOP_TEN; i++) 
+	    p[i] = (struct program *)0L;
+	prog = prog_list;
+	do
+	{
+            update_prog_profile(prog, now, 0.0, 0.0);
+
+	    for(i = NUMBER_OF_TOP_TEN-1; i >= 0; i--) 
+	    {
+		if ( p[i] && (prog->cpu_avg <= p[i]->cpu_avg))
+		    break;
+	    }
+
+	    if (i < (NUMBER_OF_TOP_TEN - 1)) 
+		for (j = 0; j <= i; j++)
+		    if (strcmp(p[j]->name,prog->name) == 0)
+		    {
+			i = NUMBER_OF_TOP_TEN-1;
+			break;
+		    }
+
+	    if (i < (NUMBER_OF_TOP_TEN - 1)) 
+	    {
+		j = NUMBER_OF_TOP_TEN - 2;
+		while(j > i) 
+		{
+		    p[j + 1] = p[j];
+		    j--;
+		}
+		p[i + 1] = prog;
+	    }
+	} while (prog_list != (prog = prog->next_all));
+	v = make_cpu_array2(NUMBER_OF_TOP_TEN, p);        
+	if (v) 
+	{                                                   
+	    retval.type = T_POINTER;
+	    retval.u.vec = v;
+	    return &retval;
+	}
+	break;
+#undef NUMBER_OF_TOP_TEN
     }
+#else
+    case 46:
+	retval.type = T_STRING;
+	retval.string_type = STRING_CSTRING;
+	retval.u.string = "Only valid if GD compiled with PROFILE_LPC flag.\n";
+	return &retval;
+#endif
+    case 47: /* object_cpu_avg object */
+    {
+
+#if defined(PROFILE_LPC)
+	if (argc < 1 || (argv[0].type != T_OBJECT)) 
+            break;
+        update_prog_profile(argv[0].u.ob->prog, current_cpu(), 0.0, 0.0);
+	retval.type = T_FLOAT;
+	retval.u.number =argv[0].u.ob->prog->cpu_avg * 1e6;
+	return &retval;
+#else
+        retval.type = T_STRING;
+	retval.string_type = STRING_CSTRING;
+	retval.u.string = "Only valid if GD compiled with PROFILE_LPC flag.\n";
+	return &retval;
+#endif
+    }
+    case 48: /* getprofile_avg, 28	object */
+    {
+#if defined(PROFILE_LPC)
+	if (argc < 1 || argv[0].type != T_OBJECT)
+	    break;
+	retval.type = T_POINTER;
+	retval.u.vec = allocate_array(argv[0].u.ob->prog->num_functions);
+        double now = current_cpu();
+        struct program *prog = argv[0].u.ob->prog;
+	for (il = 0; il < (int)prog->num_functions; il++)
+	{
+            struct function *func = prog->functions + il;
+	    struct vector *res = allocate_array(3);
+            update_func_profile(func, now, 0.0, 0.0, 0);
+            res->item[0].type = T_STRING;
+            res->item[0].string_type = STRING_MSTRING;
+            res->item[0].u.string = make_mstring(func->name);
+         
+            res->item[1].type = T_FLOAT;
+            res->item[1].u.real = func->avg_time * 1e6;
+
+            res->item[2].type = T_FLOAT;
+            res->item[2].u.real = func->avg_calls;
+            
+	    retval.u.vec->item[il].type = T_POINTER;
+	    retval.u.vec->item[il].u.vec = res;
+	}
+	return &retval;
+#else
+	retval.type = T_STRING;
+	retval.string_type = STRING_CSTRING;
+	retval.u.string = "Only valid if GD compiled with PROFILE_LPC flag.\n";
+	return &retval;
+#endif
+    }
+    case 49: /* profile_timebase */
+    {
+#if defined(PROFILE_LPC)
+        if (argc < 1) { /* Return current value */
+            retval.type = T_FLOAT;
+            retval.u.real = get_profile_timebase();
+            return &retval;
+        }
+        /* Update using old timebase */
+        double now = current_cpu();
+        struct program *prog = prog_list;
+        do
+        {
+            update_prog_profile(prog, now, 0.0, 0.0);
+            for (int i = 0; i < prog->num_functions; i++)
+            {
+                struct function *func = prog->functions + i;
+                update_func_profile(func, now, 0.0, 0.0, 0);
+            }
+        } while (prog_list != (prog = prog->next_all));
+        /* Set the new value */
+
+        if (argv[0].type == T_NUMBER && argv[0].u.number > 0)
+            set_profile_timebase(argv[0].u.number);
+        else if (argv[0].type == T_FLOAT && argv[0].u.real > 1e-3)
+            set_profile_timebase(argv[0].u.real);
+        else
+            break;
+
+        retval = const1;
+        return &retval;
+#else
+        retval.type = T_STRING;
+        retval.string_type = STRING_CSTRING;
+        retval.u.string = "Only valid if GD compiled with PROFILE_LPC flag.\n";
+        return &retval;
+#endif
+    }
+    case 50:
+     
+    {
+#ifdef PROFILE_LPC
+	extern int trace_calls;
+	extern FILE *trace_calls_file;
+
+        if (argc < 1 || argv[0].type != T_NUMBER)
+	    break;
+
+	if (!trace_calls && argv[0].u.number) {
+	    if ((trace_calls_file = fopen(TRACE_CALLS_FILE, "w")) == 0)
+                break;
+            setvbuf(trace_calls_file, 0, _IOFBF, 1<<20); /* Set a 1MB buffer */
+	    trace_calls = 1;
+	} else if (trace_calls && !argv[0].u.number) {
+	    fclose(trace_calls_file);
+	    trace_calls_file = 0;
+	    trace_calls = 0;
+	}
+        retval = const1;
+        return &retval;
+#else
+        retval.type = T_STRING;
+        retval.string_type = STRING_CSTRING;
+        retval.u.string = "Only valid if GD compiled with PROFILE_LPC.\n";
+        return &retval;
+#endif
+    }
+    case 51:
+     
+    {
+#if defined(PROFILE_LPC)
+	long long num_top, criteria, num_items = 0;
+        double now = current_cpu(), crit_val;
+	struct program *prog;
+	struct {
+	    struct program *prog;
+	    double crit_val;
+	    unsigned short func_index;
+	} *result;
+        if (argc < 2 ||
+	    argv[0].type != T_NUMBER ||
+	    argv[1].type != T_NUMBER)
+	    break;
+	num_top = argv[0].u.number;
+	criteria = argv[1].u.number;
+	if (num_top < 0 || num_top > 1000) {
+	    retval.type = T_STRING;
+	    retval.string_type = STRING_CSTRING;
+	    retval.u.string = "The number of itmes must be >= 0 and <= 1000.";
+	    break;
+	}
+	if (criteria < 0 || criteria > 9) {
+	    retval.type = T_STRING;
+	    retval.string_type = STRING_CSTRING;
+	    retval.u.string = "The criteria must be >= 0 and <= 9.";    
+	    break;
+	}
+	if (num_top == 0) {
+	    retval.type = T_POINTER;
+	    retval.u.vec = allocate_array(0);
+	    return &retval;
+	}
+
+	result = xalloc(sizeof(*result) * (num_top + 1));
+	memset(result, 0, sizeof(*result) * (num_top + 1));
+
+	prog = prog_list;
+	do
+	{
+            update_prog_profile(prog, now, 0.0, 0.0);
+            for (int i = 0; i < prog->num_functions; i++)
+            {
+                struct function *func = prog->functions + i;
+                update_func_profile(func, now, 0.0, 0.0, 0);
+		crit_val = get_top_func_criteria(func, criteria);
+
+		if (num_items == num_top &&
+		    result[num_items - 1].crit_val >= crit_val)
+		    continue;
+		if (num_items == 0 || (num_items < num_top &&
+		    result[num_items - 1].crit_val >= crit_val)) {
+		    result[num_items].prog = prog;
+		    result[num_items].func_index = i;
+		    result[num_items].crit_val = crit_val;
+		    num_items++;
+		} else {
+		    int insert = num_items;
+		    while (insert > 0 &&
+			   result[insert - 1].crit_val < crit_val)
+			insert--;
+		    memmove(&result[insert + 1], &result[insert],
+			    sizeof(*result) * (num_items - insert));
+		    result[insert].prog = prog;
+		    result[insert].func_index = i;
+		    result[insert].crit_val = crit_val;
+		    if (num_items < num_top)
+			num_items++;
+		}
+            }
+	} while ((prog = prog->next_all) != prog_list);
+
+	retval.type = T_POINTER;
+	retval.u.vec = allocate_array(num_items);
+	for (int i = 0; i < num_items; i++) {
+	    struct vector *val = allocate_array(9);
+	    prog = result[i].prog;
+	    struct function *func = &prog->functions[result[i].func_index];
+	    crit_val = result[i].crit_val;
+
+	    val->item[0].type = T_STRING;
+	    val->item[0].string_type = STRING_MSTRING;
+	    val->item[0].u.string = make_mstring(prog->name);
+
+	    val->item[1].type = T_STRING;
+	    val->item[1].string_type = STRING_SSTRING;
+	    val->item[1].u.string = func->name;
+	    reference_sstring(func->name);
+
+	    val->item[2].type = T_FLOAT;
+	    val->item[2].u.real = crit_val;
+	    
+	    val->item[3].type = T_FLOAT;
+	    val->item[3].u.real = func->time_spent;
+	    
+	    val->item[4].type = T_FLOAT;
+	    val->item[4].u.real = func->avg_time;
+	    
+	    val->item[5].type = T_FLOAT;
+	    val->item[5].u.real = func->tot_time_spent;
+	    
+	    val->item[6].type = T_FLOAT;
+	    val->item[6].u.real = func->avg_tot_time;
+	    
+	    val->item[7].type = T_FLOAT;
+	    val->item[7].u.real = func->num_calls;
+	    
+	    val->item[8].type = T_FLOAT;
+	    val->item[8].u.real = func->avg_calls;
+	    
+	    retval.u.vec->item[i].type = T_POINTER;
+	    retval.u.vec->item[i].u.vec = val;
+	}
+	free(result);
+        return &retval;
+#else
+        retval.type = T_STRING;
+        retval.string_type = STRING_CSTRING;
+        retval.u.string = "Only valid if GD compiled with PROFILE_LPC.\n";
+        return &retval;
+#endif
+	}
+    }
+
     retval = const0;
     return &retval;
 }
-
-#if defined(RUSAGE) && defined(PROFILE_OBJS)
+#if defined(PROFILE_LPC)
+static double
+get_top_func_criteria(struct function *func, int criteria)
+{
+    switch (criteria) {
+      case 0:
+	return func->time_spent;
+      case 1:
+	return func->avg_time;
+      case 2:
+	return func->tot_time_spent;
+      case 3:
+	return func->avg_tot_time;
+      case 4:
+	return func->num_calls;
+      case 5:
+	return func->avg_calls;
+      case 6:
+	return func->num_calls > 0 ? func->time_spent / func->num_calls : -DBL_MAX;
+      case 7:
+	return func->avg_calls > 1e-30 ? func->avg_time / func->avg_calls : -DBL_MAX;
+      case 8:
+	return func->num_calls > 0 ? func->tot_time_spent / func->num_calls : -DBL_MAX;
+      case 9:
+	return func->avg_calls > 1e-30 ? func->avg_tot_time / func->avg_calls : -DBL_MAX;
+	
+      default:
+	return -DBL_MAX;
+    }
+}
 static struct vector *
 make_cpu_array(int i, struct program *prog[])
 {
@@ -1069,8 +1274,32 @@ make_cpu_array(int i, struct program *prog[])
 
     for(num = 0; num < i; num++) 
     {
-	(void)sprintf(buff, "%8.8ld:%s", prog ? prog[num]->cpu : 0L, 
-		prog ? prog[num]->name : "");
+	(void)sprintf(buff, "%16lld:%s",
+		      (long long)(prog ? prog[num]->cpu * 1e6: 0L),
+		      prog ? prog[num]->name : "");
+	free_svalue(&ret->item[num]);
+	ret->item[num].type = T_STRING;
+	ret->item[num].string_type = STRING_MSTRING;
+	ret->item[num].u.string = make_mstring(buff);
+    }
+    return ret;
+}
+static struct vector *
+make_cpu_array2(int i, struct program *prog[])
+{
+    int num;
+    struct vector *ret;
+    char buff[1024]; /* should REALLY be enough */
+
+    if (i <= 0) 
+	return 0;
+    ret = allocate_array(i);
+
+    for(num = 0; num < i; num++) 
+    {
+	(void)sprintf(buff, "%22.18g:%s",
+		      (double)(prog ? prog[num]->cpu_avg * 1e6: 0L),
+		      prog ? prog[num]->name : "");
 	free_svalue(&ret->item[num]);
 	ret->item[num].type = T_STRING;
 	ret->item[num].string_type = STRING_MSTRING;
@@ -1092,9 +1321,6 @@ get_variables(struct object *ob)
     if (ob->flags & O_DESTRUCTED)
 	return const0;
 
-#ifdef USE_SWAP
-    access_object(ob);
-#endif
 
     if (!ob->variables)
 	return const0;
@@ -1109,9 +1335,6 @@ get_variables(struct object *ob)
 	if (!(ob->prog->inherit[j].type & TYPE_MOD_SECOND) &&
 	    ob->prog->inherit[j].prog->num_variables > 0)
 	{
-#ifdef USE_SWAP
-	    access_program(ob->prog->inherit[j].prog);
-#endif
 	    for (i = 0; i < (int)ob->prog->inherit[j].prog->num_variables; i++)
 	    {
 		if (num_var == 0)
@@ -1130,10 +1353,6 @@ get_variables(struct object *ob)
     res.u.map = make_mapping(names, values);
     free_vector(names);
     free_vector(values);
-#ifdef USE_SWAP
-    access_object(current_object);
-    access_program(current_prog);
-#endif
     return res;
 }
 
@@ -1146,18 +1365,11 @@ get_variable(struct object *ob, char *var_name)
    if (ob->flags & O_DESTRUCTED)
 	return res;
 
-#ifdef USE_SWAP
-    access_object(ob);
-#endif
-    
     if (!ob->variables)
 	return const0;
     
     if ((i = find_status(ob->prog, var_name,0)) != -1)
 	assign_svalue_no_free(&res, &ob->variables[i]);
-#ifdef USE_SWAP
-    access_object(current_object);
-#endif
     return res;
 }
 
@@ -1185,7 +1397,7 @@ mem_incr(struct svalue *var)
 	num_map++;
 	mem_mapping(var->u.map);
 	break;
-    case T_ARRAY:
+    case T_POINTER:
 	array_elem += var->u.vec->size;
 	num_arr++;
 	mem_array(var->u.vec);
@@ -1268,35 +1480,13 @@ mem_array(struct vector *v)
     v->size = size;
 }
 
-char *
-mem_variables(struct object *ob)
+static void
+mem_variables(FILE *f, struct object *ob)
 {
     int i;
-    int num_var;
-    static char buf[128];
-#ifdef USE_SWAP
-    int was_swapped;
-    extern void swap_object(struct object *);
-#endif
-
-    if (ob->flags & O_DESTRUCTED)
-	return "DESTRUCTED                          ";
-
-    if (ob->flags & O_SWAPPED)
-#ifdef USE_SWAP
-    {
-	load_ob_from_swap(ob);
-	was_swapped = 1;
-    }
-    else
-	was_swapped = 0;
-#else
-	return "SWAPPED                             ";
-#endif
-
-    if (!ob->variables)
-	return "NOT AVAILABLE                       ";
-
+    int num_var, num_inv;
+    struct object *o;
+    
     mapping_elem = 0;
     array_elem = 0;
     string_size = 0;
@@ -1309,17 +1499,19 @@ mem_variables(struct object *ob)
 
     num_var = ob->prog->num_variables +
 	ob->prog->inherit[ob->prog->num_inherited - 1].variable_index_offset;
-
+    if (!ob->variables)
+	num_var = -1;
     for (i = -1; i < num_var; i++)
     {
 	mem_incr(&ob->variables[i]);
     }
-    (void)sprintf(buf, "A %6d %6d M %6d %6d S %6d %6d O %6d N %6d F %6d",
+    for (num_inv = 0, o = ob->contains; o;
+	 num_inv++, o = o->next_inv) ;
+
+    fprintf(f, "%6d %6d %6d %6d"
+	    " %6d %6d %6d %6d %6d"
+	    " %6d %6d %s %s\n",
 	    num_arr, array_elem, num_map, mapping_elem,
-	    num_string, string_size, num_ob, num_num, num_float);
-#ifdef USE_SWAP
-    if (was_swapped)
-	swap_object(ob);
-#endif
-    return buf;
+	    num_string, string_size, num_ob, num_num, num_float,
+	    num_inv, ob->num_callouts, ob->super ? ob->super->name : "(void)", ob->name);
 }

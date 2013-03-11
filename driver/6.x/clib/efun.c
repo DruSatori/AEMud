@@ -36,12 +36,17 @@ efun_sort(struct svalue *fp)
     struct closure *compare = NULL;
     struct svalue h, t;
 
-    if (fp[0].type == T_ARRAY)
+    if (fp[0].type == T_POINTER)
     {
 	start = p = 0;
 	end = fp[0].u.vec->size;
 	if (fp[1].type == T_FUNCTION) {
 	    compare = fp[1].u.func;
+            if (compare->funtype == FUN_EFUN)
+            {
+                error("sort_array with efun function");
+            }
+            
 	    while (p || (end - start) > 1)
 	    {
 		if ((end - start) < 2)
@@ -174,8 +179,7 @@ efun_cat_file(struct svalue *fp)
     str = read_file(fp[0].u.string, fp[1].u.number, fp[2].u.number);
     if (str)
     {
-	push_mstring(make_mstring(str));
-	free(str);
+	push_mstring(str);
 	if (command_giver)
 	    (void)apply("catch_tell", command_giver, 1, 0);
 	else
@@ -220,7 +224,7 @@ efun_tell_room(struct svalue *fp)
 	size = 1;
 	oblist = &fp[2];
 	break;
-    case T_ARRAY:
+    case T_POINTER:
 	size = fp[2].u.vec->size;
 	oblist = fp[2].u.vec->item;
 	break;
@@ -263,6 +267,8 @@ efun_tell_room(struct svalue *fp)
 	(void)apply("catch_msg", ob, 2, 0); 
     }
 }
+
+
 static func func_tell_room = 
 {
     "tell_room",
@@ -318,7 +324,7 @@ efun_say(struct svalue *fp)
 	size = 1;
 	oblist = &fp[1];
 	break;
-    case T_ARRAY:
+    case T_POINTER:
 	size = fp[1].u.vec->size;
 	oblist = fp[1].u.vec->item;
 	break;
@@ -391,6 +397,7 @@ efun_say(struct svalue *fp)
        (void)apply("catch_msg", ob, 2, 0); 
     }   
 }
+
 static func func_say = 
 {
     "say",

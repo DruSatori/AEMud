@@ -10,9 +10,6 @@
 #include <memory.h>
 #include <unistd.h>
 #include <sys/time.h>
-#if defined(sun) || defined(__osf__)
-#include <alloca.h>
-#endif
 
 #include "config.h"
 #include "lint.h"
@@ -26,30 +23,24 @@
 #include "signals.h"
 #include "comm1.h"
 #include "simulate.h"
+#include "backend.h"
+#include "mstring.h"
 
 struct gdexception *exception = NULL;
 /*
  * The driver's idea of current time
  */
-int current_time;
-int alarm_time;
 
 extern struct object *command_giver, *current_interactive, *obj_list_destruct;
 extern int num_player, d_flag, s_flag;
 extern struct object *previous_ob, *master_ob;
 
-#ifdef USE_SWAP
-extern int used_memory;
-#endif
+extern int slow_shut_down_to_do;
 
 void tmpclean (void);
 void prepare_ipc(void),
-    shutdowngame(void), ed_cmd (char *),
-    print_prompt(void), call_out(struct timeval *),
+    shutdowngame(void), ed_cmd (char *), call_out(struct timeval *),
     destruct2 (struct object *);
-#ifdef USE_SWAP
-void try_to_swap(void);
-#endif
 
 extern int player_parser (char *),
     call_function_interactive (struct interactive *, char *);
@@ -75,11 +66,7 @@ clear_state(void)
     current_interactive = 0;
     previous_ob = 0;
     current_prog = 0;
-    reset_machine(0);	/* Pop down the stack. */
-#if defined(RUSAGE) && defined(PROFILE_OBJS)
-    clear_cpu_stack();  /* gec or the stack would overfill some day */
-                        /* error (setjmp) recovery always calls this ... */
-#endif
+    reset_machine();	/* Pop down the stack. */
 }
 
 void 
@@ -111,16 +98,7 @@ parse_command(char *str, struct object *ob)
 {
     struct object *save = command_giver;
     int res;
-#ifdef NO_ANSI
-    /* disallow users to issue commands containing ansi escape codes */
-    char *c;
 
-    for (c = str; *c; c++)
-    {
-        if (*c == 27)
-            *c = ' ';           /* replace ESC with ' ' */
-    }
-#endif
     command_giver = ob;
     res = player_parser(str);
     command_giver = save;
@@ -197,25 +175,155 @@ int eval_cost;
 static void
 sigfpe_handler(int sig)
 {
-#ifdef lint
-    sig = sig;
-#endif
 #ifdef SYSV
     signal(SIGFPE, sifgpe_handler);
 #endif
     error("Floating point error.\n");
 }
 
-/*
- * This is the backend. We will stay here for ever (almost).
- */
-void 
-backend(void)
+static struct task task_head;
+static long num_tasks = 0;
+
+void
+init_tasks(void) {
+    task_head.fkn = task_head.arg = 0;
+    task_head.prev = task_head.next = &task_head;
+}
+
+static void 
+append_task(struct task *task) {
+    if (!task)
+	return;
+    task->next = &task_head;
+    task->prev = task_head.prev;
+    task_head.prev->next = task;
+    task_head.prev = task;
+    num_tasks++;
+}
+
+static void
+prepend_task(struct task *task)
+{
+    task->next = task_head.next;
+    task->prev = &task_head;
+    task_head.next->prev = task;
+    task_head.next = task;
+    num_tasks++;
+}
+
+struct task *
+create_task(void (*f)(void *), void *arg)
+{
+    struct task *new_task;
+    
+    new_task = xalloc(sizeof(struct task));
+    new_task->fkn = f;
+    new_task->arg = arg;
+    append_task(new_task);
+    return new_task;
+}
+
+struct task *
+create_hiprio_task(void (*f)(void *), void *arg)
+{
+    struct task *new_task;
+    
+    new_task = xalloc(sizeof(struct task));
+    new_task->fkn = f;
+    new_task->arg = arg;
+    prepend_task(new_task);
+    return new_task;
+}
+
+    
+void
+remove_task(struct task*t)
+{
+    if (!t)
+	return;
+    if (t->next && t->next != t)
+	num_tasks--;
+    if (t->prev)
+	t->prev->next = t->next;
+    if (t->next)
+	t->next->prev = t->prev;
+
+    t->prev = t->next = 0;
+}
+
+void
+reschedule_task(struct task *t)
+{
+    if (!t)
+	return;
+    
+    if (t->next == t)
+	return; /* It's the currently running task, it will be rescheduled
+		   when it is finnished */
+    if (t->next == 0) {
+	t->prev = t->next = t; /* it's the currrently running task. Mark it
+				  for rescheduling */
+	return;
+    }
+    /* Move the task to the tail */
+    remove_task(t);
+    append_task(t);
+}
+
+static void
+runtask(struct task *t)
 {
     struct gdexception exception_frame;
-    struct timeval tv;
+    
+    exception_frame.e_exception = NULL;
+    exception_frame.e_catch = 0;
+    exception = &exception_frame;
+    clear_state();
+    tmpclean(); 		/* Free all temporary memory */
+    remove_destructed_objects(); /* marion - before ref checks! */
+    eval_cost = 0;
+
+    if (setjmp(exception_frame.e_context) == 0) {
+	t->fkn(t->arg);
+    }
+    clear_state();
+    tmpclean(); 		/* Free all temporary memory */
+    remove_destructed_objects(); /* marion - before ref checks! */
+    eval_cost = 0;
+}
+
+/*
+ * Call this one when there is only little memory left.
+ * We tell master object of our troubles and hope it does something
+ * intelligent, like starting Armageddon.
+ */
+
+static struct task *shutdown_task;
+
+static void 
+slow_shut_down(void *v)
+{
+    shutdown_task = 0;
+    push_number(slow_shut_down_to_do);
+    slow_shut_down_to_do = 0;
+    apply_master_ob(M_MEMORY_FAILURE, 1);
+}
+
+static void
+check_for_slow_shut_down(void)
+{
+    if (!slow_shut_down_to_do || shutdown_task) 
+	return;
+    shutdown_task = create_hiprio_task(slow_shut_down, 0);
+}
+
+void
+mainloop(void)
+{
     extern int game_is_being_shut_down;
-    extern int slow_shut_down_to_do;
+    struct task *current_task;
+    struct timeval tv;
+    double task_start;
 
 #ifdef SUPER_SNOOP
     read_snoop_file();
@@ -225,57 +333,45 @@ backend(void)
     prepare_ipc();
     (void) signal(SIGFPE, sigfpe_handler);
 
-    exception_frame.e_exception = NULL;
-    exception_frame.e_catch = 0;
-    (void)setjmp(exception_frame.e_context);
-    exception = &exception_frame;
-
-    /*
-     * We come here after errors, and have to clear some global variables.
-     */
-    for (;;)
-    {
+    while (!game_is_being_shut_down) {
+	while (task_head.next == &task_head) {
+	    set_current_time();
+	    deliver_signals();
+	    call_out(&tv);	    
+	    if (task_head.next != &task_head)
+		tv.tv_sec = tv.tv_usec = 0;
+	    nd_select(&tv);
+	    check_for_slow_shut_down();
+	}
 	set_current_time();
-	/* 
-	 * Moved clear_state() inside the while loop after bugreport
-	 * from Desmodus (TMI), 920112.
-	 *
-         * The call of clear_state() should not really have to be done
-         * once every loop. However, there seem to be holes where the
-         * state is not consistent. If these holes are removed,
-         * then the call of clear_state() can be moved to just before the
-         * while() - statment. *sigh* /Lars
-	 */
-	clear_state();
-	tmpclean(); 		/* Free all temporary memory */
-	eval_cost = 0;
-	remove_destructed_objects(); /* marion - before ref checks! */
+	current_task = task_head.next;
+	remove_task(current_task);
+	runtask(current_task);
+	task_start = current_time;
+	set_current_time();
+	update_runq_av((num_tasks + 1.0) * (current_time - task_start));
 
+	/* process callouts and IO */
 	deliver_signals();
-#ifdef DEBUG
-	if (d_flag & DEBUG_CHK_REF)
-	    check_a_lot_ref_counts(0);
-#endif
-	if (game_is_being_shut_down) {
-	    shutdowngame();
-	    break;
-	}
-	if (slow_shut_down_to_do)
-	{
-	    int tmp = slow_shut_down_to_do;
-	    slow_shut_down_to_do = 0;
-	    slow_shut_down(tmp);
-	}
-
-	call_out(&tv);
+	if (task_head.next != &task_head ||
+	    current_task->next == current_task) {
+	    tv.tv_sec = tv.tv_usec = 0;
+	    call_out(NULL);
+        } else 
+	    call_out(&tv);
+	if (task_head.next != &task_head ||
+	    current_task->next == current_task)
+	    tv.tv_sec = tv.tv_usec = 0;
 	nd_select(&tv);
-
-#ifdef USE_SWAP
-	try_to_swap();
-#endif /* USE_SWAP */
+	check_for_slow_shut_down();
+	
+	if (current_task->next == current_task)
+	    append_task(current_task); /* reschedule the task */
+	else
+	    free(current_task);
     }
+    shutdowngame();
 }
-
 
 /*
  * The start_boot() in master.c is supposed to return an array of files to load.
@@ -293,6 +389,9 @@ preload_objects(int eflag)
     struct svalue *ret = NULL;
     volatile int ix;
 
+    set_current_time();
+
+
     if (setjmp(exception_frame.e_context)) 
     {
 	clear_state();
@@ -309,7 +408,7 @@ preload_objects(int eflag)
 	ret = apply_master_ob(M_START_BOOT, 1);
     }
 
-    if ((ret == 0) || (ret->type != T_ARRAY))
+    if ((ret == 0) || (ret->type != T_POINTER))
 	return;
     else
 	prefiles = ret->u.vec;
@@ -328,6 +427,7 @@ preload_objects(int eflag)
 
     while (++ix < prefiles->size) 
     {
+        set_current_time();
 	if (s_flag)
 	    reset_mudstatus();
 	eval_cost = 0;
@@ -340,6 +440,7 @@ preload_objects(int eflag)
     }
     free_vector(prefiles);
     exception = NULL;
+    set_current_time();
 }
 
 /*
@@ -428,7 +529,7 @@ read_file(char *file, int start, int len)
 	start = 1;
     if (!len)
 	read_file_len = len = READ_FILE_MAX_SIZE;
-    str = xalloc(size + 1);
+    str = allocate_mstring(size);
     str[size] = '\0';
     do
     {
@@ -437,7 +538,7 @@ read_file(char *file, int start, int len)
         if (fread(str, size, 1, f) != 1)
 	{
     	    (void)fclose(f);
-	    free(str);
+	    free_mstring(str);
     	    return 0;
         }
 	st.st_size -= size;
@@ -464,7 +565,7 @@ read_file(char *file, int start, int len)
         if (fread(p2, size, 1, f) != 1)
 	{
     	    (void)fclose(f);
-	    free(str);
+	    free_mstring(str);
     	    return 0;
         }
 	st.st_size -= size;
@@ -482,7 +583,7 @@ read_file(char *file, int start, int len)
 	{
 	    /* tried to read more than READ_MAX_FILE_SIZE */
 	    (void)fclose(f);
-	    free(str);
+	    free_mstring(str);
 	    return 0;
 	}
     }
@@ -497,7 +598,7 @@ read_bytes(char *file, int start, size_t len)
 {
     struct stat st;
 
-    char *str,*p;
+    char *str;
     int size;
     int f;
 
@@ -536,7 +637,7 @@ read_bytes(char *file, int start, size_t len)
 	return 0;
     }
 
-    str = alloca(len + 1);
+    str = allocate_mstring(len);
 
     size = read(f, str, len);
 
@@ -544,6 +645,7 @@ read_bytes(char *file, int start, size_t len)
 
     if (size <= 0)
     {
+        free_mstring(str);
 	return 0;
     }
 
@@ -558,9 +660,8 @@ read_bytes(char *file, int start, size_t len)
      */
     str[size] = '\0';
 
-    p = string_copy(str);
 
-    return p;
+    return str;
 }
 
 int
@@ -664,83 +765,100 @@ file_time(char *file)
     return (int)st.st_mtime;
 }
 
-static double alarm_av = 0.0;
+typedef struct {
+    double avg1;
+    double avg5;
+    double avg15;
+    double last_time;
+} av_t;
+
+static void
+update_av(av_t *av, double amount)
+{
+    long double delta = current_time - av->last_time;
+    av->last_time = current_time;
+    
+                                
+    av->avg1 = expl(-delta / 60.0l) * av->avg1 +
+	(1.0l - expl(-1.0l/60.0l)) * amount;
+
+    av->avg5 = expl(-delta / 300.0l) * av->avg5 +
+	(1.0l - expl(-1.0l/300.0l)) * amount;
+
+    av->avg15 = expl(-delta / 900.0l) * av->avg15 +
+	(1.0l - expl(-1.0l/900.0l)) * amount;
+}
+
+static av_t tcp_av = {0.0, 0.0, 0.0, 0.0};
+
+void 
+update_tcp_av(void) 
+{
+    update_av(&tcp_av, 1);
+}
+
+static av_t udp_av = {0.0, 0.0, 0.0, 0.0};
+
+void 
+update_udp_av(void) 
+{
+    update_av(&udp_av, 1);
+}
+
+static av_t alarm_av = {0.0, 0.0, 0.0, 0.0};
 
 void 
 update_alarm_av(void) 
 {
-    extern double consts[5];
-    static int last_time;
-    int n;
-    double c;
-    static int acc = 0;
-
-    acc++;
-    if (current_time == last_time)
-	return;
-    n = current_time - last_time;
-    if (n < sizeof consts / sizeof consts[0])
-	c = consts[n];
-    else
-	c = exp(- n / 900.0);
-    alarm_av = c * alarm_av + acc * (1 - c) / n;
-    last_time = current_time;
-    acc = 0;
+    update_av(&alarm_av, 1);
 }
 
-static double load_av = 0.0;
+static av_t load_av = {0.0, 0.0, 0.0, 0.0};
 
 void 
 update_load_av(void) 
 {
-    extern double consts[5];
-    static int last_time;
-    int n;
-    double c;
-    static int acc = 0;
-
-    acc++;
-    if (current_time == last_time)
-	return;
-    n = current_time - last_time;
-    if (n < sizeof consts / sizeof consts[0])
-	c = consts[n];
-    else
-	c = exp(- n / 900.0);
-    load_av = c * load_av + acc * (1 - c) / n;
-    last_time = current_time;
-    acc = 0;
+    update_av(&load_av, 1);
 }
 
-static double compile_av = 0.0;
+static av_t runq_av = {0.0, 0.0, 0.0, 0.0};
+
+void 
+update_runq_av(double l)
+{
+    update_av(&runq_av, l);
+}
+
+static av_t compile_av = {0.0, 0.0, 0.0, 0.0};
 
 void 
 update_compile_av(int lines)
 {
-    extern double consts[5];
-    static int last_time;
-    int n;
-    double c;
-    static int acc = 0;
-
-    acc += lines;
-    if (current_time == last_time)
-	return;
-    n = current_time - last_time;
-    if (n < sizeof consts / sizeof consts[0])
-	c = consts[n];
-    else
-	c = exp(- n / 900.0);
-    compile_av = c * compile_av + acc * (1 - c) / n;
-    last_time = current_time;
-    acc = 0;
+    update_av(&compile_av, lines);
 }
 
 char *
 query_load_av(void)
 {
-    static char buff[100];
-
-    (void)sprintf(buff, "%.2f cmds/s, %.2f comp lines/s, %.2f alarms/s", load_av, compile_av, alarm_av);
+    static char buff[1024];
+    update_av(&load_av, 0);
+    update_av(&compile_av, 0);
+    update_av(&alarm_av, 0);
+    update_av(&udp_av, 0);
+    update_av(&tcp_av, 0);
+    snprintf(buff, sizeof(buff) - 1,
+	     "%.2f/%.2f/%.2f cmds/s, "
+	     "%.2f/%.2f/%.2f comp lines/s, "
+	     "%.2f/%.2f/%.2f alarms/s, "
+	     "%.2f/%.2f/%.2f udp requests/s, "
+	     "%.2f/%.2f/%.2f service requests/s, "
+	     "%.2f/%.2f/%.2f runqueue length (current %ld)",
+	     load_av.avg1, load_av.avg5, load_av.avg15,
+	     compile_av.avg1, compile_av.avg5, compile_av.avg15,
+	     alarm_av.avg1, alarm_av.avg5, alarm_av.avg15,
+	     udp_av.avg1, udp_av.avg5, udp_av.avg15,
+	     tcp_av.avg1, tcp_av.avg5, tcp_av.avg15,
+	     runq_av.avg1, runq_av.avg5, runq_av.avg15, num_tasks + 1);
+    buff[sizeof(buff) - 1] = 0;
     return buff;
 }

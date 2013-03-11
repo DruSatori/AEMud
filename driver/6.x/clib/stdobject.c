@@ -16,6 +16,7 @@
 /* Define variables */
 extern struct object *previous_ob;
 
+
 /* Define functions */
 
 static var obj_prev = { "obj_previous", 0 };
@@ -86,9 +87,10 @@ object_check_call(struct svalue *fp)
     }
     else
     {
-	push_string(retstr, STRING_MSTRING);
-	if (str != retstr)
-	    free(retstr);
+        if (retstr)
+	    push_mstring(retstr);
+        else
+            push_svalue(&fp[0]);
     }
 
     assign_svalue(&VAR(obj_prev), &const0);
@@ -138,14 +140,19 @@ object_query_prop(struct svalue *fp)
 	assign_svalue(&VAR(obj_prev), &tmp);
     }
     else
-    {
 	assign_svalue(&VAR(obj_prev), &const0);
-    }
 	
 
     if (val->type == T_FUNCTION)
     {
 	fun = val->u.func;
+        
+        if (!legal_closure(fun))
+        {
+            push_number(0);
+            return;
+        }
+        
 	(void)call_var(0, fun);
 	assign_svalue(&VAR(obj_prev), &const0);
 	return;
@@ -156,7 +163,8 @@ object_query_prop(struct svalue *fp)
     {
 	p = &str[2];
 	p2 = &p[-1];
-	while ((p2 = (char *) strchr(&p2[1], '@')) && (p2[1] != '@'))
+	while ((p2 = (char *) strchr(&p2[1], '@')) &&
+	       (p2[1] != '@'))
 	    ;
 	if (!p2)
 	{
@@ -171,14 +179,10 @@ object_query_prop(struct svalue *fp)
 	    ret = process_value(p2, 1);
 	}
 	else
-	{
 	    retstr = process_string(str, 1);
-	}
     }
     else
-    {
         retstr = process_string(str, 1);
-    }
 
     if (ret)
     {
@@ -186,9 +190,10 @@ object_query_prop(struct svalue *fp)
     }
     else
     {
-	push_string(retstr, STRING_MSTRING);
-	if (str != retstr)
-	    free(retstr);
+        if (retstr)
+	    push_mstring(retstr);
+        else
+            push_svalue(val);
     }
 
     assign_svalue(&VAR(obj_prev), &const0);
@@ -199,40 +204,6 @@ static func func_query_prop =
 {
     "query_prop",
     object_query_prop,
-};
-
-static void
-object_remove_prop(struct svalue *fp)
-{
-   extern struct svalue *get_map_lvalue(struct mapping *,
-					 struct svalue *, int );
-   struct svalue *oval;
-
-   if (VAR(obj_no_change).u.number || VAR(obj_props).type != T_MAPPING)
-   {
-      push_number(0);
-      return;
-   }
-
-   oval = get_map_lvalue(VAR(obj_props).u.map, fp, 0);
-
-   if (current_object->super)
-   {
-      push_svalue(&fp[0]);
-      push_svalue(0);
-      push_svalue(oval);
-      (void)apply("notify_change_prop",current_object->super, 3, 0);
-   }
-
-   free_svalue(oval);
-   push_number(0);
-   return;
-}
-
-static func func_remove_prop = 
-{
-    "remove_prop",
-    object_remove_prop,
 };
 
 static void
@@ -287,13 +258,11 @@ static func *(funcs[]) =
 {
     &func_check_call,
     &func_query_prop,
-#if 0
-    &func_remove_prop,
     &func_add_prop,
     &func_change_prop,
-#endif
     0,
 };
+
 
 struct interface stdobject = 
 {
@@ -301,3 +270,4 @@ struct interface stdobject =
     vars,
     funcs,
 };
+

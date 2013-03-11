@@ -51,6 +51,7 @@
 
 #include <stdio.h>
 #include <string.h>
+#include <ctype.h>
 #include <sys/types.h>
 
 #include "config.h"
@@ -132,10 +133,9 @@ typedef unsigned int format_info;
 #define INFO_ARRAY 0x100
 #define INFO_COLS 0x200
 #define INFO_TABLE 0x400
-#define INFO_COMMA 0x800
+#define	INFO_COMMA 0x800
 
-
-#define BUFF_SIZE 20000
+#define BUFF_SIZE 65535
 
 #define ERROR(x) longjmp(error_jmp, x)
 #define ERR_BUFF_OVERFLOW	0x1	/* buffer overflowed */
@@ -229,20 +229,19 @@ stradd(char **dst, size_t *size, char *add)
 } /* end of stradd() */
 
 static void 
-numadd(char **dst, size_t *size, int num)
+numadd(char **dst, size_t *size, long long snum)
 {
-    int i, j, nve;
+    unsigned long long i, unum = snum;
+    int nve = 0;
     char *tmp;
+    int j;
     
-    if (num < 0)
+    if (snum < 0)
     {
-	num *= -1;
+        unum = -snum;
 	nve = 1;
     }
-    else
-	nve = 0;
-    
-    for (i = 10, j = 0; i > 10 && num >= i && j < 30; i *= 10, j++) /* LA XXX */
+    for (i = 10, j = 0; unum >= i && j < 18; i *= 10, j++) /* LA XXX */
 	;
     i = strlen(*dst) + nve;
     if ((i + j) >= *size)
@@ -258,49 +257,9 @@ numadd(char **dst, size_t *size, int num)
     if (nve)
 	(*dst)[i - 1] = '-';
     (*dst)[i + j + 1] = '\0';
-    for ( ; j >= 0; j--, num /= 10)
-	(*dst)[i + j] = (num % 10) + '0';
+    for ( ; j >= 0; j--, unum /= 10)
+	(*dst)[i + j] = (unum % 10) + '0';
 } /* end of num_add() */
-
-void
-add_commas(char *strp)
-{
-    char *dp;
-    int n, c, i;
-
-    for (;;)
-    {
-      if (*strp == '\0')
-          return;
-      if (isxdigit(*strp))
-          break;
-      strp++;
-    }
-
-    for (n = 0; isxdigit(*strp); n++)
-      strp++;
-
-    c = (n - 1) / 3;
-
-    if (c > 0)
-    {
-      dp = strp + c;
-
-      *dp = '\0';
-
-      for (i = 0; i < n; i++)
-      {
-          *--dp = *--strp;
-          if (i % 3 == 2 && c != 0)
-          {
-              *--dp = ',';
-              if (--c == 0)
-                  break;
-          }
-      }
-    }
-}
-
 
 /*
  * This is a function purely because stradd() is, to keep same param
@@ -326,86 +285,6 @@ add_indent(char **dst, size_t *size, int indent)
     for ( ; indent; indent--)
 	(*dst)[i++] = ' ';
     (*dst)[i] = '\0';
-}
-
-/*
- * Returns the length of a string sans colour codes
- */
-static int
-ansi_strlen( char *str, int *ended)
-{
-    int  len = 0;
-    int tlen = 0;
-    int code = 0;
-
-    while ( *str ) {
-        if( *str++ == '^' ) {
-          switch( *(str ) ) {
-            case '=' :
-              code = 1;
-              for( tlen=3;tlen>0;tlen--) if( *str) str++;
-              break;
-            case '+' : case '-':
-              code = 1;
-              for( tlen=2;tlen>0;tlen--) if( *str) str++;
-              break;
-            case '*' : case 'n' : case 'N':
-               code = 0;
-              for( tlen=1;tlen>0;tlen--) if( *str) str++;
-              break;
-            default:
-              for( tlen=1;tlen>0;tlen--) if( *str) str++;
-              len++;
-              break;
-          }
-        } else {
-          len++;
-        }
-    }
-    if( ended != NULL ) {
-      *ended = ( code == 0 ) ? 1 : 0;
-    }
-    return len;
-}
-
-/*
- * Returns the number of characters to copy that won't break colour codes
- */
-static int
-ansi_maxlen( char *str, int max, char stop, int *ended )
-{
-    char *pstr = str;
-    int tlen = 0;
-    int code;
-
-    while ( max && *pstr && ( *pstr != stop ) ) {
-        if( *pstr++ == '^' ) {
-          switch( *(pstr ) ) {
-            case '=' :
-              code = 1;
-              for( tlen=3;tlen>0;tlen--) if( *pstr) pstr++;
-              break;
-            case '+' : case '-':
-              code = 1;
-              for( tlen=2;tlen>0;tlen--) if( *pstr) pstr++;
-              break;
-            case '*' : case 'n' : case 'N':
-              code = 0;
-              for( tlen=1;tlen>0;tlen--) if( *pstr) pstr++;
-              break;
-            default:
-              for( tlen=1;tlen>0;tlen--) if( *pstr) pstr++;
-              max--;
-              break;
-          }
-        } else {
-          max--;
-        }
-    }
-    if( ended != NULL ) {
-      *ended = ( code == 0 ) ? 1 : 0;
-    }
-    return ( pstr - str ) ;
 }
 
 /*
@@ -438,7 +317,7 @@ svalue_to_string(struct svalue *obj, char **str, size_t size, int indent,
     case T_FLOAT:
 	{
 	    char buffer[1024];
-	    (void)sprintf(buffer,"%8e",obj->u.real);
+	    (void)sprintf(buffer,"%.18g",obj->u.real);
 	    stradd(str,&size,buffer);
 	}
 	break;
@@ -447,7 +326,7 @@ svalue_to_string(struct svalue *obj, char **str, size_t size, int indent,
 	stradd(str, &size, obj->u.string);
 	stradd(str, &size, "\"");
 	break;
-    case T_ARRAY:
+    case T_POINTER:
 	if (!(obj->u.vec->size))
 	{
 	    stradd(str, &size, "({ })");
@@ -540,17 +419,13 @@ static void
 add_justified(char *str, char *pad, unsigned int fs, format_info finfo, short trailing)
 {
     size_t len;
-    size_t r_len;
     int i;
-    int ended;
     
-    len = ansi_strlen(str, &ended);
-    r_len = strlen(str);
-
+    len = strlen(str);
     switch(finfo & INFO_J)
     {
     case INFO_J_LEFT:
-	for (i = 0; i < r_len; i++)
+	for (i = 0; i < len; i++)
 	    ADD_CHAR(str[i]);
 	fs -= len;
 	len = strlen(pad);
@@ -577,7 +452,7 @@ add_justified(char *str, char *pad, unsigned int fs, format_info finfo, short tr
 	    }
 	    ADD_CHAR(pad[i % l]);
 	}
-	for (i = 0; i < r_len; i++)
+	for (i = 0; i < len; i++)
 	    ADD_CHAR(str[i]);
 	j = (fs - len) / 2;
 	if (trailing)
@@ -606,14 +481,10 @@ add_justified(char *str, char *pad, unsigned int fs, format_info finfo, short tr
 	    }
 	    ADD_CHAR(pad[i % l]);
 	}
-	for (i = 0; i < r_len; i++)
+	for (i = 0; i < len; i++)
 	    ADD_CHAR(str[i]);
     }
     }
-  if( ended == 0 ) {
-    ADD_CHAR( '^' );
-    ADD_CHAR( '*' );
-  }
 } /* end of add_justified() */
     
 /*
@@ -628,16 +499,12 @@ add_column(cst **column, short int trailing)
     register unsigned int done;
     unsigned int save;
     
-    done = ansi_maxlen( (*column)->d.col, (*column)->prec, '\n', NULL );
-    /** Replace with a for loop that'll handle colour codes correctly */
-    /***
     for (done = 0;
 	 (done < (*column)->prec) &&
 	 ((*column)->d.col)[done] &&
 	 (((*column)->d.col)[done] != '\n');
 	 done++)
 	;
-     ***/
     if (((*column)->d.col)[done] && (((*column)->d.col)[done] != '\n'))
     {
 	save = done;
@@ -721,6 +588,45 @@ add_table(cst **table, short int trailing)
     return 0;
 } /* end of add_table() */
 
+void
+add_commas(char *strp)
+{
+    char *dp;
+    int n, c, i;
+
+    for (;;)
+    {
+	if (*strp == '\0')
+	    return;
+	if (isxdigit(*strp))
+	    break;
+	strp++;
+    }
+
+    for (n = 0; isxdigit(*strp); n++)
+	strp++;
+
+    c = (n - 1) / 3;
+
+    if (c > 0)
+    {
+	dp = strp + c;
+
+	*dp = '\0';
+
+	for (i = 0; i < n; i++)
+	{
+	    *--dp = *--strp;
+	    if (i % 3 == 2 && c != 0)
+	    {
+		*--dp = ',';
+		if (--c == 0)
+		    break;
+	    }
+	}
+    }
+}
+
 /*
  * THE (s)printf() function.
  * It returns a pointer to it's internal buffer (or a string in the text
@@ -741,6 +647,7 @@ string_print_formatted(int call_master, char *format_str, int argc, struct svalu
     int prec;		/* precision */
     unsigned int i;
     char *pad;		/* fs pad string */
+    format_info format;
 
     nelemno = 0;
     call_master_ob = call_master;
@@ -1012,7 +919,7 @@ string_print_formatted(int call_master, char *format_str, int argc, struct svalu
 	     */
 	    if (finfo & INFO_ARRAY)
 	    {
-		if (carg->type != T_ARRAY || carg->u.vec->size == 0)
+		if (carg->type != T_POINTER || carg->u.vec->size == 0)
 		{
 		    fpos--; /* About to get incremented */
 		    continue;
@@ -1047,12 +954,11 @@ string_print_formatted(int call_master, char *format_str, int argc, struct svalu
 		    ADD_CHAR('%');
 		} else if ((finfo & INFO_T) == INFO_T_STRING)
 		{
-		    int slen,ualen;
+		    int slen;
 		    
 		    if (carg->type != T_STRING)
 			ERROR(ERR_INCORRECT_ARG_S);
 		    slen = strlen(carg->u.string);
-		    ualen = ansi_strlen(carg->u.string,NULL);
 		    if ((finfo & INFO_COLS) || (finfo & INFO_TABLE))
 		    {
 			cst **temp;
@@ -1158,18 +1064,14 @@ string_print_formatted(int call_master, char *format_str, int argc, struct svalu
 		    }
 		    else
 		    { /* not column or table */
-                        int ended = 1;
-			if (prec && prec < ualen)
+			if (prec && prec < slen)
 			{
-                            int r_len = 
-                              ansi_maxlen( carg->u.string, prec, 0, &ended );
 			    if (carg != clean)
-				SAVE_CHAR(((carg->u.string)+r_len));
-			    carg->u.string[r_len] = '\0';
-			    slen = r_len;
-                            ualen = prec;
+				SAVE_CHAR(((carg->u.string)+prec));
+			    carg->u.string[prec] = '\0';
+			    slen = prec;
 			}
-			if (fs && fs>ualen) {
+			if (fs && fs>slen) {
 			    add_justified(carg->u.string, pad, fs, finfo,
 					  (((format_str[fpos] != '\n') &&
 					    (format_str[fpos] != '\0'))
@@ -1181,54 +1083,49 @@ string_print_formatted(int call_master, char *format_str, int argc, struct svalu
 			{
 			    for (i = 0; i < slen; i++)
 				ADD_CHAR(carg->u.string[i]);
-                            if( !ended ) ADD_CHAR( '^' );
-                            if( !ended ) ADD_CHAR( '*' );
 			}
 		    }
 		} else if (finfo & INFO_T_INT) { /* one of the integer types */
-		    char cheat[4];
 		    char temp[100];
 		    
-		    *cheat = '%';
-		    i = 1;
-		    switch (finfo & INFO_PP)
-		    {
-		    case INFO_PP_SPACE:
-			cheat[i++] = ' ';
-			break;
-		    case INFO_PP_PLUS:
-			cheat[i++] = '+';
-			break;
-		    }
-		    switch (finfo & INFO_T)
-		    {
-		    case INFO_T_INT:
-			cheat[i++] = 'd'; break;
-		    case INFO_T_CHAR: cheat[i++] = 'c'; break;
-		    case INFO_T_OCT: cheat[i++] = 'o'; break;
-		    case INFO_T_HEX: cheat[i++] = 'x'; break;
-		    case INFO_T_C_HEX: cheat[i++] = 'X'; break;
-		    default: ERROR(ERR_BAD_INT_TYPE);
-		    }
 		    if (carg->type != T_NUMBER)
 		    { /* sigh... */
 #ifdef RETURN_ERROR_MESSAGES
 			(void)sprintf(buff,
-				"ERROR: (s)printf(): incorrect argument type to %%%c.\n",
-				cheat[i-1]);
+				      "ERROR: (s)printf(): incorrect argument type to %%d.\n");
 			(void)fprintf(stderr, "%s:%s: %s", current_object->name,
 				      get_srccode_position_if_any(), buff);
 			return buff;
 #else
-			error("ERROR: (s)printf(): incorrect argument type to %%%c.\n",
-			      cheat[i-1]);
+			error("ERROR: (s)printf(): incorrect argument type to %%d.\n");
 #endif /* RETURN_ERROR_MESSAGES */
 		    }
-		    cheat[i] = '\0';
-		    (void)sprintf(temp, cheat, carg->u.number);
-                    if (finfo & INFO_COMMA)
-                        add_commas(temp);
-
+		    format = finfo & INFO_T;
+		    if (format == INFO_T_INT)
+			switch (finfo & INFO_PP)
+			{
+			  case INFO_PP_SPACE:
+			    sprintf(temp, "% lld", carg->u.number);
+			    break;
+			  case INFO_PP_PLUS:
+			    sprintf(temp, "%+lld", carg->u.number);
+			    break;
+			  default:
+			    sprintf(temp, "%lld", carg->u.number);
+			}
+		    else if (format == INFO_T_CHAR)
+			sprintf(temp, "%c", (int)carg->u.number);
+		    else if (format == INFO_T_OCT)
+			sprintf(temp, "%llo", carg->u.number);
+		    else if (format == INFO_T_HEX)
+			sprintf(temp, "%llx", carg->u.number);
+		    else if (format == INFO_T_C_HEX)
+			sprintf(temp, "%llX", carg->u.number);
+		    else {
+			ERROR(ERR_BAD_INT_TYPE);
+		    }
+		    if (finfo & INFO_COMMA)
+			add_commas(temp);
 		    {
 			int tmpl = strlen(temp);
 
@@ -1248,51 +1145,66 @@ string_print_formatted(int call_master, char *format_str, int argc, struct svalu
 		else if ((i=finfo&INFO_T) == INFO_T_FLOAT_E ||
 			  i == INFO_T_FLOAT_F || i == INFO_T_FLOAT_G)
 		{
-		    char cheat[50];
 		    char temp[100];
 
-		    *cheat = '%';
-		    i = 1;
-		    switch (finfo & INFO_PP)
-		    {
-			case INFO_PP_SPACE:
-			    cheat[i++] = ' ';
-			    break;
-			case INFO_PP_PLUS:
-			    cheat[i++] = '+';
-			    break;
-		    }
-		    if (prec > 0)
-		    {
-			cheat[i++] = '.';
-			cheat[i] = '\0';
-			(void)sprintf(cheat,"%s%d",cheat,prec);
-			i = strlen(cheat);
-		    }
-		    switch (finfo & INFO_T)
-		    {
-			case INFO_T_FLOAT_E: cheat[i++] = 'e'; break;
-			case INFO_T_FLOAT_F: cheat[i++] = 'f'; break;
-			case INFO_T_FLOAT_G: cheat[i++] = 'g'; break;
-			default: ERROR(ERR_BAD_FLOAT_TYPE);
-		    }
 		    if (carg->type != T_FLOAT)
 		    { /* sigh... */
 #ifdef RETURN_ERROR_MESSAGES
 			(void)sprintf(buff,
-				"ERROR: (s)printf(): incorrect argument type to %%%c.\n",cheat[i-1]);
+				"ERROR: (s)printf(): incorrect argument type to %%f.\n");
 			(void)fprintf(stderr, "%s:%s: %s", current_object->name,
 				      get_srccode_position_if_any(), buff);
 			return buff;
 #else
-			error("ERROR: (s)printf(): incorrect argument type to %%%c.\n",cheat[i-1]);
+			error("ERROR: (s)printf(): incorrect argument type to %%f.\n");
 #endif /* RETURN_ERROR_MESSAGES */
 		    }
-		    cheat[i] = '\0';
-		    (void)sprintf(temp,cheat,carg->u.real);
+
+		    if (prec <= 0)
+			prec = 6;
+		    format = finfo & INFO_T; 
+		    if (format == INFO_T_FLOAT_E)
+			switch (finfo & INFO_PP) {
+			  case INFO_PP_SPACE: 
+			    (void)sprintf(temp,"% .*e",prec, carg->u.real);
+			    break;
+			  case INFO_PP_PLUS: 
+			    (void)sprintf(temp,"%+.*e",prec, carg->u.real);
+			    break;
+			  default:
+			    (void)sprintf(temp,"%.*e",prec, carg->u.real);
+			    break;
+			}
+		    else if (format == INFO_T_FLOAT_F)
+			switch (finfo & INFO_PP) {
+			  case INFO_PP_SPACE: 
+			    (void)sprintf(temp,"% .*f",prec, carg->u.real);
+			    break;
+			  case INFO_PP_PLUS: 
+			    (void)sprintf(temp,"%+.*f",prec, carg->u.real);
+			    break;
+			  default:
+			    (void)sprintf(temp,"%.*f",prec, carg->u.real);
+			    break;
+			}
+		    else if (format == INFO_T_FLOAT_G)
+			switch (finfo & INFO_PP) {
+			  case INFO_PP_SPACE: 
+			    (void)sprintf(temp,"% .*g",prec, carg->u.real);
+			    break;
+			  case INFO_PP_PLUS: 
+			    (void)sprintf(temp,"%+.*g",prec, carg->u.real);
+			    break;
+			  default:
+			    (void)sprintf(temp,"%.*g",prec, carg->u.real);
+			    break;
+			}
+		    else {
+			ERROR(ERR_BAD_FLOAT_TYPE);
+		    }
 		    {
 			int tmpl = strlen(temp);
-
+			
 			if (tmpl < fs)
 			    add_justified(temp, pad, fs, finfo,
 					  (((format_str[fpos] != '\n') &&

@@ -1,4 +1,4 @@
-#if defined(PROFILE) || !defined(__GNUC__)
+#if defined(PROFILE)
 void free_svalue(struct svalue *);
 #else /* PROFILE */
 static __inline__ void 
@@ -25,7 +25,7 @@ free_svalue(struct svalue *v)
 	case T_OBJECT:
 	    free_object(v->u.ob, "free_svalue");
 	    break;
-	case T_ARRAY:
+	case T_POINTER:
 	    free_vector(v->u.vec);
 	    break;
 	case T_MAPPING:

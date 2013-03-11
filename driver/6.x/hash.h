@@ -1,2 +1,2 @@
-int hashstr16(char *s, int maxn);
-int hashstr(char *s, int maxn, int hashs);
+int hashstr16(const char *s, int maxn);
+int hashstr(const char *s, int maxn, int hashs);

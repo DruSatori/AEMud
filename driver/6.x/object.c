@@ -4,12 +4,7 @@
 #include <stdlib.h>
 #include <ctype.h>
 #include <string.h>
-#ifdef __STDC__
 #include <memory.h>
-#endif
-#if defined(sun) || defined(__osf__)
-#include <alloca.h>
-#endif
 
 #include "config.h"
 #include "lint.h"
@@ -23,7 +18,6 @@
 #include "mapping.h"
 #include "mudstat.h"
 #include "hash.h"
-#include "swap.h"
 #include "main.h"
 #include "simulate.h"
 #ifdef DEALLOCATE_MEMORY_AT_SHUTDOWN
@@ -48,22 +42,30 @@ struct savebuf {
     unsigned int max_size;
     unsigned int size;
     char *buf;
+    FILE *f;
 };
 
+
+#define STRBUFSIZE 4096
+#define MAX_DEPTH  10000
 
 void
 add_strbuf(struct savebuf *sbuf, char *str)
 {
-    size_t len;
+    size_t len = strlen(str);
 
-    len = strlen(str);
+    if (sbuf->f) {
+	fwrite(str, len, 1, sbuf->f);
+	return;
+    }
+    
     if (sbuf->size + len + 1 > sbuf->max_size)
     {
 	char *nbuf;
 	size_t nsize;
-
-	nbuf = xalloc(nsize = len + sbuf->size + 80);
-	(void)strcpy(nbuf, sbuf->buf);
+	nsize = ((len + sbuf->size) / STRBUFSIZE + 1) * STRBUFSIZE;
+	nbuf = xalloc(nsize);
+	(void)memcpy(nbuf, sbuf->buf, sbuf->size);
 	sbuf->max_size = nsize;
 	free(sbuf->buf);
 	sbuf->buf = nbuf;
@@ -72,7 +74,6 @@ add_strbuf(struct savebuf *sbuf, char *str)
     sbuf->size += len;
 }
 
-
 #define Fprintf(s) if (fprintf s == EOF) failed=1
 
 static void save_one (struct savebuf *,struct svalue *);
@@ -80,7 +81,7 @@ static void save_one (struct savebuf *,struct svalue *);
 static void
 save_string(struct savebuf *f, char *s)
 {
-    char buf[2];
+    static char buf[2];
 
     buf[1] = '\0';
     
@@ -99,7 +100,6 @@ save_string(struct savebuf *f, char *s)
 	    add_strbuf(f, "\\n");
 	    break;
 	default:
-	/*if (isprint(*s))*/
 	    buf[0] = *s;
 	    add_strbuf(f, buf);
 	    break;
@@ -150,21 +150,29 @@ save_mapping(struct savebuf *f, struct mapping *m)
 static void
 save_one(struct savebuf *f, struct svalue *v)
 {
-    char buf[20];
+    static char buf[48];
+    static int depth = 0;
+
+    if (++depth > MAX_DEPTH)
+    {
+        free(f->buf);
+        depth = 0;
+        error("Too deep recursion\n");
+    }
 
     switch(v->type) {
     case T_FLOAT:
-	(void)sprintf(buf,"#%.8e#", v->u.real);
+	(void)sprintf(buf,"#%a#", v->u.real);
 	add_strbuf(f, buf);
 	break;
     case T_NUMBER:
-	(void)sprintf(buf, "%d", v->u.number);
+	(void)sprintf(buf, "%lld", v->u.number);
 	add_strbuf(f, buf);
 	break;
     case T_STRING:
 	save_string(f, v->u.string);
 	break;
-    case T_ARRAY:
+    case T_POINTER:
 	save_array(f, v->u.vec);
 	break;
     case T_MAPPING:
@@ -185,6 +193,8 @@ save_one(struct savebuf *f, struct svalue *v)
 	add_strbuf(f, "0");
 	break;
     }
+
+    depth--;
 }
 
 /*
@@ -230,31 +240,31 @@ void save_object(struct object *ob, char *file)
     sbuf.size = 0;
     sbuf.max_size = 80;
     sbuf.buf = xalloc(80);
+    sbuf.f = f;
+    
     for (j = 0; j < (int)ob->prog->num_inherited; j++)
     {
 	struct program *prog = ob->prog->inherit[j].prog;
 	if (ob->prog->inherit[j].type & TYPE_MOD_SECOND ||
 	    prog->num_variables == 0)
 	    continue;
-#ifdef USE_SWAP
-	access_program(prog);
-#endif
 	for (i = 0; i < (int)prog->num_variables; i++) {
 	    struct svalue *v =
 		&ob->variables[i + ob->prog->inherit[j].variable_index_offset];
 	    
 	    if (ob->prog->inherit[j].prog->variable_names[i].type & TYPE_MOD_STATIC)
 		continue;
-	    if (v->type == T_NUMBER || v->type == T_STRING || v->type == T_ARRAY
+	    if (v->type == T_NUMBER || v->type == T_STRING || v->type == T_POINTER
 		|| v->type == T_MAPPING || v->type == T_OBJECT || v->type == T_FLOAT) {	/* XXX function */
-		sbuf.size = 0;
-		sbuf.buf[0] = 0;
+		add_strbuf(&sbuf, ob->prog->inherit[j].prog->variable_names[i].name);
+		add_strbuf(&sbuf, " ");
 		save_one(&sbuf, v);
-		Fprintf((f, "%s %s\n", ob->prog->inherit[j].prog->variable_names[i].name, sbuf.buf));
+		add_strbuf(&sbuf, "\n");
 	    }
 	}
     }
 
+    fwrite(sbuf.buf, sbuf.size, 1, f);
     free(sbuf.buf);
     if (fclose(f) == EOF)
 	failed = 1;
@@ -295,9 +305,6 @@ m_save_object(struct object *ob)
 	if (ob->prog->inherit[j].type & TYPE_MOD_SECOND ||
 	    prog->num_variables == 0)
 	    continue;
-#ifdef USE_SWAP
-	access_program(prog);
-#endif
 	for (i = 0; i < (int)prog->num_variables; i++)
 	{
 	    struct svalue *v =
@@ -366,6 +373,8 @@ save_map(struct object *ob, struct mapping *map, char *file)
     sbuf.size = 0;
     sbuf.max_size = 80;
     sbuf.buf = xalloc(80);
+    sbuf.f = f;
+    
     for (j = 0; j < map->size; j++)
     {
 	for (i = map->pairs[j]; i; i = i->next) {
@@ -374,16 +383,16 @@ save_map(struct object *ob, struct mapping *map, char *file)
 	    
 	    if (i->arg.type != T_STRING)
 		continue;
-	    if (v->type == T_NUMBER || v->type == T_STRING || v->type == T_ARRAY
+	    if (v->type == T_NUMBER || v->type == T_STRING || v->type == T_POINTER
 		|| v->type == T_MAPPING || v->type == T_OBJECT || v->type == T_FLOAT) { /* XXX function */
-		sbuf.size = 0;
-		sbuf.buf[0] = 0;
+		add_strbuf(&sbuf, i->arg.u.string);
+		add_strbuf(&sbuf, " ");
 		save_one(&sbuf, v);
-		Fprintf((f, "%s %s\n", i->arg.u.string, sbuf.buf));
+		add_strbuf(&sbuf, "\n");
 	    }
 	}
     }
-
+    fwrite(sbuf.buf, sbuf.size, 1, f);
     free(sbuf.buf);
     if (fclose(f) == EOF)
 	failed = 1;
@@ -410,6 +419,8 @@ valtostr(struct svalue *sval)
     sbuf.size = 0;
     sbuf.max_size = 80;
     sbuf.buf[0] = 0;
+    sbuf.f = NULL;
+    
     save_one(&sbuf, sval);
 
     return sbuf.buf;
@@ -544,7 +555,7 @@ restore_one(struct svalue *v, char **msp)
 		    return 0;
 		}
 		free_svalue(v);
-		v->type = T_ARRAY;
+		v->type = T_POINTER;
 		v->u.vec = vec;
 	    }
 	    break;
@@ -612,12 +623,11 @@ restore_one(struct svalue *v, char **msp)
         break;
     case '#':
 	{
-	    float f;
+	    double f;
 	    char *b = strchr(s + 1, '#');
 	    if (b == NULL)
 		return 0;
-	    if (sscanf(s,"#%f#",&f) != 1)
-		return 0;
+            f = strtod(s + 1, NULL);
 	    free_svalue(v);
 	    v->type = T_FLOAT;
 	    v->u.real = f;
@@ -629,7 +639,7 @@ restore_one(struct svalue *v, char **msp)
 	    return 0;
 	free_svalue(v);
 	v->type = T_NUMBER;
-	v->u.number = atoi(s);
+	v->u.number = atoll(s);
 	while(isdigit(*s) || *s == '-')
 	    s++;
 	break;
@@ -799,6 +809,7 @@ restore_map(struct object *ob, struct mapping *map, char *file)
 	if (!restore_one(get_map_lvalue(map,&v,1), &space)) {
 	    (void)fclose(f);
 	    free(buff);
+	    free_svalue(&v);
 	    error("Illegal format when restoring %s.\n", file);
 	}
 	free_svalue(&v);
@@ -819,7 +830,7 @@ free_object(struct object *ob, char *from)
     if (!(ob->flags & O_DESTRUCTED))
     {
 	/* This is fatal, and should never happen. */
-	fatal("FATAL: Object 0x%lx %s ref count 0, but not destructed (from %s).\n",
+	fatal("FATAL: Object %p %s ref count 0, but not destructed (from %s).\n",
 	    ob, ob->name, from);
     }
     if (ob->interactive)
@@ -880,19 +891,10 @@ get_empty_object()
 static void
 force_remove_object(struct object *ob)
 {
-    extern struct object *swap_ob;
-
     remove_object_from_stack(ob);
-    if (ob == swap_ob)
-	swap_ob = ob->prev_all;
-    if (ob == obj_list)
-	obj_list = ob->next_all;
-    ob->prev_all->next_all = ob->next_all;
-    ob->next_all->prev_all = ob->prev_all;
-    if (ob->next_all == ob)
-	obj_list = swap_ob = 0;
-    delete_all_calls(ob);
     remove_object_hash(ob);
+    remove_task(ob->callout_task);
+    delete_all_calls(ob);
     ob->next_all = obj_list_destruct;
     ob->prev_all = NULL;
     obj_list_destruct = ob;
@@ -903,12 +905,7 @@ force_remove_object(struct object *ob)
 void
 remove_all_objects()
 {
-    extern struct object *master_ob, *vbfc_object, *simul_efun_ob;
-#ifdef USE_AUTO_OBJ
-    extern struct object *auto_ob; 
-#endif
-		
-
+    extern struct object *master_ob, *vbfc_object, *auto_ob, *simul_efun_ob;
     struct gdexception exception_frame;
     struct object *ob;
     int n;
@@ -921,9 +918,7 @@ remove_all_objects()
 	n = 0;
 	while (ob == master_ob ||
 	       ob == vbfc_object ||
-#ifdef USE_AUTO_OBJ
 	       ob == auto_ob ||
-#endif
 	       ob == simul_efun_ob) {
 	    ob = ob->next_all;
 	    if (n++ > 3)
@@ -935,10 +930,6 @@ remove_all_objects()
 	    clear_state();
 	else {
 	    exception = &exception_frame;
-#ifdef USE_SWAP
-	    access_object(ob);
-	    access_program(ob->prog);
-#endif
 	    ob->prog->flags &= ~PRAGMA_RESIDENT;
 	    destruct_object(ob);
 	    exception = NULL;
@@ -952,45 +943,27 @@ remove_all_objects()
     /*
      * Remove VBFC object
      */
-#ifdef USE_SWAP
-    access_object(vbfc_object);
-    access_program(vbfc_object->prog);
-#endif
     force_remove_object(vbfc_object);
     free_object(vbfc_object, "remove_all_objects");
     vbfc_object = NULL;
     /*
      * Remove master object
      */
-#ifdef USE_SWAP
-    access_object(master_ob);
-    access_program(master_ob->prog);
-#endif
     force_remove_object(master_ob);
     free_object(master_ob, "remove_all_objects");
     master_ob = NULL;
     /*
      * Remove simul_efun object
      */
-#ifdef USE_SWAP
-    access_object(simul_efun_ob);
-    access_program(simul_efun_ob->prog);
-#endif
     force_remove_object(simul_efun_ob);
     free_object(simul_efun_ob, "remove_all_objects");
     simul_efun_ob = NULL;
     /*
      * Remove auto object
      */
-#ifdef USE_AUTO_OBJ
-#ifdef USE_SWAP
-    access_object(auto_ob);
-    access_program(auto_ob->prog);
-#endif
     force_remove_object(auto_ob);
     free_object(auto_ob, "remove_all_objects");
     auto_ob = NULL;
-#endif
 }
 #endif
 
@@ -1026,16 +999,13 @@ static struct object *hashed_living[LIVING_HASH_SIZE];
 
 static int num_living_names, num_searches = 1, search_length = 1;
 
-#if defined(ultrix) && !defined(__GNUC__)
-#define LivHash(s) (hashstr((s), 100, LIVING_HASH_SIZE))
-#else
 #if BITNUM(LIVING_HASH_SIZE) == 1
 /* This one only works for even power-of-2 table size, but is faster */
 #define LivHash(s) (hashstr16((s), 100) & ((LIVING_HASH_SIZE)-1))
 #else
 #define LivHash(s) (hashstr((s), 100, LIVING_HASH_SIZE))
 #endif
-#endif
+
 
 struct object *
 find_living_object(char *str)
@@ -1100,40 +1070,6 @@ find_living_objects(char *str)
     return ret;
 }
 
-#ifdef HIDE_HOST_HACK
-static struct hentry {
-  char name[32];
-  char ip[32];
-} hidden_hosts[64];
-
-
-void
-set_hidden_ip( struct object *ob ) {
-  char *name = ob->living_name;
-  FILE *fp = fopen( HIDE_HOST_HACK, "r" );
-  int i = -1;
-  if( !fp ) return;
-  if( !name ) return;
-  while( !feof( fp ) && i++ < 64 ) {
-    char line[64];
-    char *fname, *ip, *lp=line;
-    line[ 0 ] = '\0';
-    fgets( line, 64, fp );
-    fname = strsep( &lp, " \n" );
-    ip = strsep( &lp, " \n" );
-    if( fname && ip && !strcasecmp( name, fname ) ) {
-      inet_aton( ip, &(ob->interactive->addr.sin_addr) );
-      break;
-    }
-  }
-  fclose( fp );
-}
-#else
-void
-set_hidden_ip( struct object *ob ) {
-}
-#endif
-
 void 
 set_living_name(struct object *ob, char *str)
 {
@@ -1160,7 +1096,6 @@ set_living_name(struct object *ob, char *str)
 #ifdef SUPER_SNOOP
     check_supersnoop(ob);
 #endif
-    if( ob->interactive ) { set_hidden_ip( ob ); }
     return;
 }
 
@@ -1211,10 +1146,6 @@ struct program *prog_list;
 /* Add a program to the list of all programs */
 void register_program(struct program *prog)
 {
-#ifdef USE_SWAP
-    extern struct program *swap_prog;
-#endif
-    
     if (prog_list)
     {
 	prog->next_all = prog_list;
@@ -1224,15 +1155,7 @@ void register_program(struct program *prog)
 	prog_list = prog;
     }
     else
-#ifdef USE_SWAP
-	swap_prog =
-#endif
 	prog_list = prog->next_all = prog->prev_all = prog;
-    
-#ifdef USE_SWAP
-    if (current_prog)
-	access_program(current_prog);
-#endif
 }
 
 /*
@@ -1246,9 +1169,6 @@ void
 free_prog(struct program *progp)
 {
     extern int total_program_size;
-#ifdef USE_SWAP
-    extern struct program *swap_prog;
-#endif
     int i;
     
     if (d_flag & DEBUG_PROG_REF)
@@ -1258,26 +1178,13 @@ free_prog(struct program *progp)
     if (progp->ref < 0)
 	fatal("Negative ref count for prog ref.\n");
 
-#ifdef USE_SWAP
-    if (progp == swap_prog)
-	swap_prog = progp->prev_all;
-#endif
     if (progp == prog_list)
 	prog_list = progp->next_all;
     
     progp->prev_all->next_all = progp->next_all;
     progp->next_all->prev_all = progp->prev_all;
     if (progp->next_all == progp)
-    {
-#ifdef USE_SWAP
-	swap_prog = 0;
-#endif
 	prog_list = 0;
-    }
-    
-#ifdef USE_SWAP
-    remove_prog_from_swap(progp);
-#endif
     
     total_program_size -= progp->exec_size;
     
@@ -1310,7 +1217,6 @@ free_prog(struct program *progp)
 void 
 create_object(struct object *ob)
 {
-    extern int current_time;
     int i;
 
     if (!(ob->flags & O_CREATED))
@@ -1339,10 +1245,12 @@ create_object(struct object *ob)
 void 
 recreate_object(struct object *ob, struct object *old_ob)
 {
-    extern int current_time;
     int i;
+    int need_create = 0;
+
     if (!(ob->flags & O_CREATED))
     {
+        need_create = 1;
 	ob->flags |= O_CREATED;
 	if (!ob->created)
 	    ob->created = current_time;
@@ -1363,6 +1271,12 @@ recreate_object(struct object *ob, struct object *old_ob)
 	push_object(old_ob);
 	call_function(ob, function_inherit_found,
 		      (unsigned int)function_index_found, 1);
+	pop_stack();
+    }
+    else if (need_create && search_for_function("create", ob->prog))
+    {
+        call_function(ob, function_inherit_found,
+		      (unsigned int)function_index_found, 0);
 	pop_stack();
     }
 }

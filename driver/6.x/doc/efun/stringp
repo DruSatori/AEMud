@@ -8,5 +8,5 @@ DESCRIPTION
 	Returns 1 if the value of 'testvar' is currently of the type string.
 
 SEE ALSO
-	intp, arrayp, mappingp, objectp, floatp
+	intp, pointerp, mappingp, objectp, floatp
 

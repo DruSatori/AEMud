@@ -8,32 +8,16 @@
 #include <sys/times.h>
 #include <stdio.h>
 #include <string.h>
+#include <unistd.h>
 
 #include "config.h"
 #include "lint.h"
-
-#ifdef sun
-time_t time (time_t *);
-#endif
-
 
 #define MUDSTAT
 #include "mudstat.h"
 
 #ifdef RUSAGE			/* Defined in config.h */
-#ifdef SOLARIS
-#include <sys/times.h>
-#include <limits.h>
-#else
 #include <sys/resource.h>
-extern int getrusage (int, struct rusage *);
-#ifdef sun
-extern int getpagesize (void);
-#endif
-#ifndef RUSAGE_SELF
-#define RUSAGE_SELF	0
-#endif
-#endif /* SOLARIS */
 #endif
 
 int		num_move,		/* Number of move_object() */
@@ -69,7 +53,7 @@ mudstatus_set(int active, int eval_lim, int time_lim)
 	s_flag = 1;
 	if ((mstat = fopen(MUDSTAT_FILE, "a")) != NULL)
 	{
-	    (void)fprintf(mstat,"\n%-30s (%5.2f) %8d\n",
+	    (void)fprintf(mstat,"\n%-35s (%5.2f) %8d\n",
 		    "------ ON, Limits:", tifl, eval_lim);
 	    (void)fclose(mstat);
 	}
@@ -78,7 +62,7 @@ mudstatus_set(int active, int eval_lim, int time_lim)
     {
 	if (s_flag && ((mstat = fopen(MUDSTAT_FILE,"a")) != NULL))
 	{
-	    (void)fprintf(mstat,"\n%-30s\n", "------ OFF");
+	    (void)fprintf(mstat,"\n%-35s\n", "------ OFF");
 	    (void)fclose(mstat);
 	}
 	s_flag = 0;
@@ -94,12 +78,6 @@ static void
 mark_millitime()
 {
 #ifdef RUSAGE
-#ifdef SOLARIS
-    struct tms buffer;
-    
-    if (times(&buffer) != -1)
-	mch_t1 = buffer.tms_utime + buffer.tms_stime;
-#else
     static struct rusage rus;
     if (getrusage(RUSAGE_SELF, &rus) >= 0) 
     {                      
@@ -108,7 +86,6 @@ mark_millitime()
 	mch_t1 = rus.ru_utime.tv_sec * 1000 + rus.ru_utime.tv_usec / 1000 +
 	    rus.ru_stime.tv_sec * 1000 + rus.ru_stime.tv_usec / 1000; 
     }
-#endif
 #endif
 
     (void)times(&tms1);
@@ -137,15 +114,6 @@ get_millitime()
 int 
 get_processtime()
 {
-#ifdef SOLARIS
-    struct tms buffer;
-    long mch_t2;
-    
-    if (times(&buffer) != -1)
-	mch_t2 = buffer.tms_utime + buffer.tms_stime;
-    else
-	return 0;
-#else
     static struct rusage rus;
     long mch_t2;
 
@@ -157,7 +125,6 @@ get_processtime()
 	    rus.ru_stime.tv_sec * 1000 + rus.ru_stime.tv_usec / 1000; 
     } else
 	return 0;
-#endif /* SOLARIS */
     return (int)(mch_t2 - mch_t1);
 }
 #else
@@ -193,16 +160,16 @@ print_mudstatus(char *activity, int eval, int timem, int tiproc)
     if ((mstat = fopen(MUDSTAT_FILE,"a")) != NULL)
     {
 	if (!num_pr)
-	    (void)fprintf(mstat,"\n%-30s (%11s) %8s %3s %3s %3s %3s %3s\n",
+	    (void)fprintf(mstat,"\n%-35s (%11s) %8s %3s %3s %3s %3s %3s\n",
 			  "Activity", "time:cpu", "evalcost", "cp", "mc",
 			  "rd", "wr", "mv");
 	num_pr = (num_pr + 1) % 10;
-	if (strlen(activity) < 30U)
-	    (void)fprintf(mstat,"%-30s (%5.2f:%5.2f) %8d %3d %3d %3d %3d %3d\n",
+	if (strlen(activity) < 35U)
+	    (void)fprintf(mstat,"%-35s (%5.2f:%5.2f) %8d %3d %3d %3d %3d %3d\n",
 			  activity, tifl, tifl2, eval, num_compile, num_mcall, 
 			  num_fileread, num_filewrite, num_move);
 	else
-	    (void)fprintf(mstat,"%s\n%-30s (%5.2f:%5.2f) %8d %3d %3d %3d %3d %3d\n",
+	    (void)fprintf(mstat,"%s\n%-35s (%5.2f:%5.2f) %8d %3d %3d %3d %3d %3d\n",
 			  activity, "", tifl, tifl2, eval, num_compile, num_mcall, 
 			  num_fileread, num_filewrite, num_move);
 	    

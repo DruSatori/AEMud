@@ -34,6 +34,5 @@ Flags accepted by driver:
 
 -p'port'	Use 'port' as the service port (for ftp and other purposes)
 
--O	Print out an obsolete warning to stdout for functions that use it.
 
 

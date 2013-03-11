@@ -1,9 +1,6 @@
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
-#if defined(sun) || defined(__osf__)
-#include <alloca.h>
-#endif
 
 #include "config.h"
 #include "lint.h"
@@ -15,6 +12,8 @@
 #include "exec.h"
 #include "main.h"
 #include "simulate.h"
+#include "comm1.h"
+#include "backend.h"
 
 #include "inline_eqs.h"
 #include "inline_svalue.h"
@@ -44,12 +43,12 @@ struct vector null_vector = {
  * Allocate an array of size 'n'.
  */
 struct vector *
-allocate_array(int n)
+allocate_array(long long nn)
 {
-    int i;
+    int i, n = nn;
     struct vector *p;
 
-    if (n < 0 || n > MAX_ARRAY_SIZE)
+    if (nn < 0 || nn > MAX_ARRAY_SIZE)
 	error("Illegal array size.\n");
     if (n == 0) {
         p = &null_vector;
@@ -71,6 +70,7 @@ void
 free_vector(struct vector *p)
 {
     int i;
+    
     if (!p->ref || --p->ref > 0)
 	return;
 #if 0
@@ -93,6 +93,28 @@ free_vector(struct vector *p)
     total_array_size -= sizeof (struct vector) + sizeof (struct svalue) *
 	(p->size-1);
     free((char *)p);
+}
+
+struct vector *
+multiply_array(struct vector *vec, long long factor)
+{
+    struct vector *result;
+    long long size = vec->size, newsize,j, offset;
+
+    if (factor <= 0 || size == 0) {
+	return allocate_array(0);
+    }
+
+    if (factor > MAX_ARRAY_SIZE)
+	error("Illegal array size.\n"); 
+
+    newsize = size * factor;
+    result = allocate_array(newsize);
+    for (offset = 0; offset < newsize;) {
+	for (j = 0; j < size; j++, offset++)
+	    assign_svalue_no_free(result->item + offset, vec->item + j);
+    }
+    return result;
 }
 
 struct vector *
@@ -162,7 +184,9 @@ explode_string(char *str, char *del)
      * Compute number of array items. It is either number of delimiters,
      * or, one more.
      */
+#ifndef KINGDOMS_EXPLODE
     if (extra)
+#endif
 	num++;
     buff = alloca(strlen(str) + 1);
     ret = allocate_array(num);
@@ -190,7 +214,10 @@ explode_string(char *str, char *del)
 	}
     }
     /* Copy last occurence, if there was not a 'del' at the end. */
-    if (*beg != '\0') {
+#ifndef KINGDOMS_EXPLODE
+    if (*beg != '\0')
+#endif
+    {
 	/* free_svalue(&ret->item[num]); Not needed for new array */
 	if (num >= ret->size)
 	    fatal("Too big index in explode !\n");
@@ -206,7 +233,7 @@ implode_string(struct vector *arr, char *del)
 {
     size_t size, len;
     int i, num;
-    char *p, *q;
+    char *p, *ret;
 
     size = 0;
     num = 0;
@@ -219,10 +246,11 @@ implode_string(struct vector *arr, char *del)
 	}
     }
     if (num == 0)
-	return string_copy("");
+	return make_mstring("");
+    
     len = strlen(del);
-    p = xalloc(size + (num-1) * len + 1);
-    q = p;
+    ret = allocate_mstring(size + (num-1) * len);
+    p = ret;
     p[0] = '\0';
     size = 0;
     num = 0;
@@ -240,13 +268,12 @@ implode_string(struct vector *arr, char *del)
 	    num++;
 	}
     }
-    return q;
+    return ret;
 }
 
 struct vector *
 users() 
 {
-    extern int num_player; /* set by comm1.c */
     int i;
     struct vector *ret;
     
@@ -265,19 +292,23 @@ users()
  * Slice of an array.
  */
 struct vector *
-slice_array(struct vector *p, int from, int to)
+slice_array(struct vector *p, long long from, long long to)
 {
     struct vector *d;
-    int cnt;
-    
+    long long cnt;
+
+#ifdef NEGATIVE_SLICE_INDEX    
     if (from < 0)
 	from = p->size + from;
+#endif
     if (from < 0)
 	from = 0;
     if (from >= p->size)
 	return allocate_array(0); /* Slice starts above array */
+#ifdef NEGATIVE_SLICE_INDEX
     if (to < 0)
 	to = p->size + to;
+#endif
     if (to >= p->size)
 	to = p->size - 1;
     if (to < from)
@@ -435,7 +466,7 @@ make_unique(struct vector *arr, struct closure *fun, struct svalue *skipnum)
     
     for (cnt = ant - 1; cnt >= 0; cnt--) /* Reverse to compensate put_in */
     {
-	ret->item[cnt].type = T_ARRAY;
+	ret->item[cnt].type = T_POINTER;
 	ret->item[cnt].u.vec = res = allocate_array(head->count);
 	nxt2 = head;
 	head = head->next;
@@ -519,7 +550,6 @@ all_inventory(struct object *ob)
 struct vector *
 map_array (struct vector *arr, struct closure *fun)
 {
-    extern void push_vector(struct vector *, bool_t);
     struct vector *r;
     int cnt;
 
@@ -586,7 +616,6 @@ match_regexp(struct vector *v, char *pattern)
     char *res;
     int i, num_match;
     struct vector *ret;
-    extern int eval_cost;
 
     if (v->size == 0)
 	return allocate_array(0);
@@ -647,9 +676,6 @@ set_manipulate_array(struct vector *arr1, struct vector *arr2, int op)
 
     m = make_mapping(arr2, 0);
     tmp.type = T_NUMBER;
-#ifdef PURIFY
-    tmp.string_type = -1;
-#endif
     tmp.u.number = 1;
     assign_svalue_no_free(get_map_lvalue(m, &arr2->item[0], 1), &tmp);
 

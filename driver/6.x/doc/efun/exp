@@ -1,12 +1,12 @@
 NAME
-	exp - e raised to the power of x
+        exp - exponential function operating on float
 
-SYNTAX
-	float exp(float x);
+SYNOPSIS
+        float   exp(float)
 
 DESCRIPTION
-	Return e to the power of x.
+        exp() returns exponential of a floating point number.
+        Uses the natural log base e=2.7183...
 
 SEE ALSO
-	cos, sin, tan, asin, acos, atan, sqrt, log, pow
-
+        math - for a list of other math functions available.

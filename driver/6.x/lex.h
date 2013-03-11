@@ -7,8 +7,9 @@ struct lpc_predef_s {
 };
 
 extern struct lpc_predef_s *lpc_predefs;
+
+void add_pre_define(char *define);    
 void start_new_file(FILE *f);
+int handle_include(char *include_name, int ignore_errors);
 void end_new_file(void);
-#ifdef DEALLOCATE_MEMORY_AT_SHUTDOWN
 void free_inc_list(void);
-#endif

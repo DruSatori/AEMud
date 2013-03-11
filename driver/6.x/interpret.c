@@ -1,17 +1,19 @@
-#include <stdarg.h>
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <ctype.h>
 #include <sys/time.h>
+#include <time.h>
 #include <sys/types.h>		/* sys/types.h and netinet/in.h are here to enable include of comm.h below */
 #include <sys/stat.h>
 /* #include <netinet/in.h> Included in comm.h below */
 #include <memory.h>
-
 #include <limits.h>
 #include <math.h>
 #include <float.h>
+#include <errno.h>
+#include <unistd.h>
 
 #include "config.h"
 #include "lint.h"
@@ -27,40 +29,16 @@
 #include "lex.h"
 #include "comm1.h"
 #include "simulate.h"
-#include "swap.h"
 #include "main.h"
+#include "sent.h"
 
 #include "inline_eqs.h"
 #include "inline_svalue.h"
 
 #include "efun_table.h"
 
-#ifdef RUSAGE			/* Defined in config.h */
-#ifndef SOLARIS
-#include <sys/resource.h>
-extern int getrusage (int, struct rusage *);
-#ifdef sun
-extern int getpagesize(void);
-#endif
-#ifndef RUSAGE_SELF
-#define RUSAGE_SELF	0
-#endif
-#else /* SOLARIS */
-#include <sys/times.h>
-#include <limits.h>
-#endif /* SOLARIS */
-#endif
+#define FLOATASGOP(lhs, op, rhs) { lhs op (double)rhs; }
 
-#define FLOATASGOP(lhs, op, rhs) { \
-	double x, y; \
-	x = (double)rhs; \
-	y = (double)lhs; \
-        y op x; \
-        x = fabs(y); \
-        if (x > FLT_MAX) error("Floating point overflow"); \
-        if (x < FLT_MIN) y = 0.0; \
-        lhs = (float)y; \
-        }
 
 struct fkntab
 {
@@ -69,6 +47,8 @@ struct fkntab
     unsigned short function_index;
 };
 
+
+extern char *crypt(const char *key, const char *salt);
 extern struct object *master_ob;
 
 extern struct vector *inherit_list (struct object *);
@@ -84,32 +64,34 @@ extern int wildmat(char *, char *);
 static struct closure *alloc_objclosure(int ftype, int funinh, int funno, struct object *ob, char *refstr, int usecache);
 static struct closure *alloc_objclosurestr(int ftype, char *funstr, struct object *ob, char *refstr, int usecache);
 INLINE int search_for_function(char *name, struct program *prog);
-#ifdef DEBUG
-static void break_point (void);
-#endif
 int s_f_f(char *name, struct program *prog);
-void master_ob_loaded (void);
 
 extern struct object *previous_ob;
 extern char *last_verb, *trig_verb;
 struct program *current_prog;
-extern int current_time, s_flag, unlimited;
+extern int  s_flag, unlimited;
 extern struct object *current_interactive;
 int variable_index_found;
 int variable_inherit_found;    
 int variable_type_mod_found;
-int cache_tries = 0, cache_hits = 0;
+unsigned long long cache_tries = 0, cache_hits = 0;
 
 int num_closures, total_closure_size;
 
 #ifdef CACHE_STATS
-int call_cache_saves = 0;
-int global_cache_saves = 0;
-int searches_needed = 0;
-int searches_done = 0;
+long long call_cache_saves = 0;
+long long global_cache_saves = 0;
+long long searches_needed = 0;
+long long searches_done = 0;
 
-int global_first_saves = 0;
-int call_first_saves = 0;
+long long global_first_saves = 0;
+long long call_first_saves = 0;
+#endif
+
+#ifdef PROFILE_LPC
+int trace_calls;
+FILE *trace_calls_file;
+double last_execution;
 #endif
 
 static int tracedepth;
@@ -239,7 +221,7 @@ push_object(struct object *ob)
  * Push a number on the value stack.
  */
 INLINE void 
-push_number(int n)
+push_number(long long n)
 {
     extend_stack();
     sp->type = T_NUMBER;
@@ -250,22 +232,8 @@ INLINE void
 push_float(double f)
 {
     extend_stack();
-    if (fabs(f) > FLT_MAX)
-	error("Floating pointer overflow.");
-    if (fabs(f) < FLT_MIN)
-	f = 0.0;
     sp->type = T_FLOAT;
     sp->u.real = f;
-}
-
-float
-chkfloatrange(double f)
-{
-    if (fabs(f) > FLT_MAX)
-	error("Floating pointer overflow.");
-    if (fabs(f) < FLT_MIN)
-	f = 0.0;
-    return (float)f;
 }
 
 INLINE void
@@ -335,7 +303,7 @@ find_value(int inh, int rnum)
  * Free the data that an svalue is pointing to. Not the svalue
  * itself.
  */
-#if defined(PROFILE) || !defined(__GNUC__)
+#if defined(PROFILE)
 void 
 free_svalue(struct svalue *v)
 {
@@ -361,6 +329,9 @@ free_svalue(struct svalue *v)
 	    free_object(v->u.ob, "free_svalue");
 	    break;
 	case T_ARRAY:
+	    free_vector(v->u.vec);
+	    break;  
+	case T_POINTER:
 	    free_vector(v->u.vec);
 	    break;
 	case T_MAPPING:
@@ -396,7 +367,7 @@ equal_svalue(const struct svalue *sval1, const struct svalue *sval2)
     else switch (sval1->type) {
 	case T_NUMBER:
 	    return sval1->u.number == sval2->u.number;
-	case T_ARRAY:
+	case T_POINTER:
 	    return sval1->u.vec == sval2->u.vec;
 	case T_MAPPING:
 	    return sval1->u.map == sval2->u.map;
@@ -440,6 +411,9 @@ add_slash(char *cp)
 INLINE void 
 assign_svalue_no_free(struct svalue *to, struct svalue *from)
 {
+    if (to == from)
+	return;
+    
 #ifdef DEBUG
     if (from == 0)
 	fatal("Null pointer to assign_svalue().\n");
@@ -463,7 +437,7 @@ assign_svalue_no_free(struct svalue *to, struct svalue *from)
     case T_OBJECT:
 	add_ref(to->u.ob, "ass to var");
 	break;
-    case T_ARRAY:
+    case T_POINTER:
 	INCREF(to->u.vec->ref);
 	break;
     case T_MAPPING:
@@ -478,6 +452,9 @@ assign_svalue_no_free(struct svalue *to, struct svalue *from)
 INLINE void 
 assign_svalue(struct svalue *dest, struct svalue *v)
 {
+    if (dest == v)
+	return;
+    
     /* First deallocate the previous value. */
     free_svalue(dest);
     assign_svalue_no_free(dest, v);
@@ -517,15 +494,16 @@ INLINE static void
 push_indexed_lvalue(int needlval)
 {
     struct svalue *i, *vec, *item;
-    int ind = 0;		/* = 0 to make Wall quiet */
+    long long ind = 0;		/* = 0 to make Wall quiet */
+    long long org_ind = 0;
     
     i = sp;
     vec = sp - 1;
     if (vec->type != T_MAPPING)
     {
-	if (i->type != T_NUMBER || i->u.number < 0)
-	    error("Illegal index\n");
-	ind = i->u.number;
+	if (i->type != T_NUMBER)
+	    error("Illegal index.\n");
+        org_ind = ind = i->u.number;
     }
     switch(vec->type) {
     case T_STRING: {
@@ -533,6 +511,10 @@ push_indexed_lvalue(int needlval)
 	/* marion says: this is a crude part of code */
 	pop_stack();
 	one_character.type = T_NUMBER;
+
+        if (ind < 0)
+            ind = strlen(vec->u.string) + ind;
+        
 	if (ind > strlen(vec->u.string) || ind < 0)
 	    one_character.u.number = 0;
 	else
@@ -541,11 +523,15 @@ push_indexed_lvalue(int needlval)
 	sp->type = T_LVALUE;
 	sp->u.lvalue = &one_character;
 	break;}
-    case T_ARRAY:
+    case T_POINTER:
 	pop_stack();
-	if (ind >= vec->u.vec->size)
-	    error ("Index out of bounds. Vector size: %d, index: %d\n",
-		   vec->u.vec->size, ind);
+
+        if (ind < 0)
+            ind = vec->u.vec->size + ind;
+        
+	if (ind >= vec->u.vec->size || ind < 0)
+	    error("Index out of bounds. Vector size: %d, index: %lld\n",
+                vec->u.vec->size, org_ind);
 	item = &vec->u.vec->item[ind];
 	if (vec->u.vec->ref == 1) {
 	    static struct svalue quickfix = { T_NUMBER };
@@ -554,6 +540,7 @@ push_indexed_lvalue(int needlval)
 	    assign_svalue (&quickfix, item);
 	    item = &quickfix;
 	}
+        
 	free_svalue(sp);	  /* This will make 'vec' invalid to use */
 	sp->type = T_LVALUE;
 	sp->u.lvalue = item;
@@ -595,82 +582,96 @@ void pop_n_elems(int n)
 	pop_stack();
 }
 
+char *
+get_typename(int type)
+{
+    
+    switch(type)
+    {
+    case T_NUMBER:
+	return "Integer";
+    case T_STRING:
+	return "String";
+    case T_POINTER:
+	return "Array";
+    case T_OBJECT:
+	return "Object";
+    case T_MAPPING:
+	return "Mapping";
+    case T_FLOAT:
+	return "Float";
+    case T_FUNCTION:
+	return "Function";
+    }
+    
+    return "Unknown";
+}
+
 void 
 bad_arg(int arg, int instr, struct svalue *sv)
 {
-    char *type_name = "Unknown";
-    
-    switch(sv->type)
-    {
-    case T_NUMBER:
-	type_name = "Integer";
-	break;
-    case T_STRING:
-	type_name = "String";
-	break;
-    case T_ARRAY:
-	type_name = "Array";
-	break;
-    case T_OBJECT:
-	type_name = "Object";
-	break;
-    case T_MAPPING:
-	type_name = "Mapping";
-	break;
-    case T_FLOAT:
-	type_name = "Float";
-	break;
-    case T_FUNCTION:
-	type_name = "Function";
-	break;
-    }
-    
-    error("Bad argument %d to %s(), received type was %s \n", arg, get_f_name(instr), type_name);
+    error("Bad argument %d to %s(), received type was %s \n", arg, get_f_name(instr), get_typename(sv->type));
 }
 
-#ifdef PROFILE_FUNS
-/*
- * Time spent in specific function
- */
-void
-time_funs(struct function *to, struct function *from)
+void 
+bad_arg_op(int instr, struct svalue *arg1, struct svalue *arg2)
 {
-#ifdef RUSAGE
-#ifdef SOLARIS
-    struct tms buffer;
-    clock_t ticks;
-    
-    if (times(&buffer) != -1)
-    {
-	ticks = buffer.tms_utime + buffer.tms_stime;
-	if (from)
-	    from->time_spent +=
-		(ticks - from->ticks_call);
-	if (to)
-	    to->ticks_call = ticks;
+    error("Bad arguments to %s(), received types were %s and %s\n",
+     get_f_name(instr), get_typename(arg1->type), get_typename(arg2->type));
+}
+
+#if defined(PROFILE_LPC)
+/* profile_exp_mtimebase should equal (1.0 - exp(-1.0/profile_timebase)) */
+static long double profile_timebase = 60.0l, profile_exp_mtimebase = 0x8.766dfa92ba7052ep-9l; 
+
+long double
+get_profile_timebase() {
+    return profile_timebase;
+}
+void
+set_profile_timebase(long double timebase) {
+    if (timebase > 0.0) {
+	profile_timebase = timebase;
+	profile_exp_mtimebase = -expm1l(-1.0l / timebase);
     }
-#else
-    struct rusage rus;
-    int cpu_s = 0, cpu_us = 0;
-    
-    if (getrusage(RUSAGE_SELF, &rus) >= 0) 
-    {                           
-	cpu_s = rus.ru_utime.tv_sec + rus.ru_stime.tv_sec;
-	cpu_us = rus.ru_utime.tv_usec + rus.ru_stime.tv_usec;
-    }
-    
-    if (from)
-    {
-	from->time_spent += (cpu_s - from->stime_call) * 100000 +
-	    (cpu_us - from->utime_call) / 10;
-    }
-    if (to)
-    {
-	to->stime_call = cpu_s;
-	to->utime_call = cpu_us;
-    }
-#endif
-#endif
+}
+
+#define _UPDATE_AV_C(delta_time) (expl(-(delta_time) / (profile_timebase)))
+#define _UPDATE_AV(avg, C, amt) \
+    ((avg) = (avg) * (C) + \
+     (amt) * (profile_exp_mtimebase))
+#define UPDATE_AV(avg, delta_time, amt) (_UPDATE_AV((avg), _UPDATE_AV_C((delta_time)), (amt)))
+
+double
+current_cpu(void)
+{
+    struct timeval tv;
+    gettimeofday(&tv, 0);
+    return tv.tv_sec +  tv.tv_usec * 1e-6;
+}
+
+void
+update_prog_profile(struct program *prog, double now, double delta, double tot_delta)
+{
+    UPDATE_AV(prog->cpu_avg, (now - prog->last_avg_update), delta);
+    prog->last_avg_update = now;
+    prog->cpu += delta;
+}
+
+void
+update_func_profile(struct function *funp, double now, double delta, double tot_delta, int calls)
+{
+    long double C = _UPDATE_AV_C((now - funp->last_call_update));
+    funp->last_call_update = now;
+
+    _UPDATE_AV(funp->avg_time, C, delta);
+    funp->time_spent += delta;
+
+    _UPDATE_AV(funp->avg_tot_time, C, tot_delta);
+    funp->tot_time_spent += tot_delta;
+
+    _UPDATE_AV(funp->avg_calls, C, calls);
+    funp->num_calls += calls;
 }
 #endif
 
@@ -697,17 +698,31 @@ save_control_context(struct control_stack *csp1)
 }
 
 void 
-push_control_stack(struct function *funp)
+push_control_stack(struct object *ob, struct program *prog, struct function *funp)
 {
     if (csp >= &control_stack[MAX_TRACE-1])
 	error("Too deep recursion.\n");
     csp++;
     save_control_context(csp);
     csp->funp = funp;	/* Only used for tracebacks */
-#ifdef PROFILE_FUNS
-    if (funp)
-	funp->num_calls++;
-    time_funs(csp->funp, (csp == control_stack) ? 0 : (csp-1)->funp);
+#if defined(PROFILE_LPC)
+    {
+	double now = current_cpu();
+
+	if (trace_calls) {
+	    if (csp == control_stack)
+		fprintf(trace_calls_file, "%.3f %.6f\n",
+                        (now - last_execution) * 1000.0, now);
+	    fprintf(trace_calls_file, "%*s%s %s %s()\n",
+		    (csp - control_stack) * 4, "",
+		    ob->name, prog->name, funp ? funp->name : "???");
+	}
+	if (csp != control_stack) {
+	    csp[-1].frame_cpu += now - csp[-1].startcpu;
+	}
+	csp->frame_start = csp->startcpu = now;
+	csp->frame_cpu = 0.0;
+    }
 #endif
 }
 
@@ -719,17 +734,10 @@ void
 restore_control_context(struct control_stack *csp1)
 {
     current_object = csp1->ob;
-#ifdef USE_SWAP
-    if (current_object)
-	access_object(csp1->ob);
-#endif
 
     current_prog = csp1->prog;
     if(current_prog)
     {
-#ifdef USE_SWAP
-	access_program(csp1->prog);
-#endif
 	pc = current_prog->program + csp1->pc;
     }
     previous_ob = csp1->prev_ob;
@@ -744,10 +752,30 @@ pop_control_stack()
     if (csp == control_stack - 1)
 	fatal("Popped out of the control stack\n");
 #endif
-    restore_control_context(csp);
-#ifdef PROFILE_FUNS
-    time_funs(csp == control_stack ? 0 : (csp-1)->funp, csp->funp);
+#if defined(PROFILE_LPC)
+    {
+	double now = current_cpu();
+	double delta = csp->frame_cpu + (now - csp->startcpu);
+	double tot_delta = now - csp->frame_start;
+	if (current_prog)
+	    update_prog_profile(current_prog, now, delta, tot_delta);
+	if (csp->funp)
+	    update_func_profile(csp->funp, now, delta, tot_delta, 1);
+	if (csp != control_stack) {
+	    csp[-1].startcpu = now;
+	} else
+	    last_execution = now;
+	if (trace_calls) {
+	    fprintf(trace_calls_file, "%*s--- %.3f / %.3f\n",
+		    (csp - control_stack) * 4, "",
+		    delta * 1000.0,
+		    tot_delta * 1000.0);
+            if (csp == control_stack)
+                putc('\n', trace_calls_file);
+        }
+    }
 #endif
+    restore_control_context(csp);
     csp--;
 }
 
@@ -762,7 +790,7 @@ push_vector(struct vector *v, bool_t reference)
     extend_stack();
     if (reference)
 	INCREF(v->ref);
-    sp->type = T_ARRAY;
+    sp->type = T_POINTER;
     sp->u.vec = v;
 }
 
@@ -828,11 +856,6 @@ setup_new_frame(struct function *funp)
 
     previous_ob_access_time = current_object->time_of_ref;
 
-#ifdef USE_SWAP
-    access_program(current_prog);
-    access_object(current_object);
-#endif
-
     if (funp->type_flags & TYPE_MOD_TRUE_VARARGS)
     {
 	if (csp->num_local_variables >= funp->num_arg)
@@ -883,15 +906,6 @@ setup_new_frame(struct function *funp)
     return current_prog->program + npc;
 }
 
-#ifdef DEBUG
-static void 
-break_point()
-{
-    if (sp - fp - csp->num_local_variables + 1 != 0)
-	fatal("Bad stack pointer.\n");
-}
-#endif
-
 /* marion
  * maintain a small and inefficient stack of error recovery context
  * data structures.
@@ -935,6 +949,7 @@ push_pop_error_context (int push)
 	p = ecsp;
 	if (p == 0)
 	    fatal("Catch: error context stack underflow\n");
+
 	if (push == 0) {
 #ifdef DEBUG
 #if 0
@@ -942,12 +957,33 @@ push_pop_error_context (int push)
 		fatal("Catch: Lost track of csp\n");
 #endif
 #endif
+	    ;
 	} else {
 	    /* push == -1 !
 	     * They did a throw() or error. That means that the control
 	     * stack must be restored manually here.
 	     */
-	    csp = p->save_csp;	
+#ifdef PROFILE_LPC
+	    double now = current_cpu();
+	    struct program *prog = current_prog;
+	    csp->frame_cpu += (now - csp->startcpu);
+	    for (;csp != p->save_csp; (prog = csp->prog), csp--) {
+		double frame_tot_cpu = now - csp->frame_start;
+		if (prog)
+		    update_prog_profile(prog, now, csp->frame_cpu, frame_tot_cpu);
+		if (csp->funp)
+		    update_func_profile(csp->funp, now, csp->frame_cpu, frame_tot_cpu, 1);
+		if (trace_calls) {
+		    fprintf(trace_calls_file, "%*s--- %.3f / %.3f\n",
+			    (csp - control_stack) * 4, "",
+			    csp->frame_cpu * 1000.0,
+			    frame_tot_cpu * 1000.0);
+		}
+	    }
+	    csp->startcpu = now;
+#else
+	    csp = p->save_csp;
+#endif
 	    pop_n_elems (sp - p->save_sp);
 	    command_giver = p->save_command_giver;
 	}
@@ -976,8 +1012,6 @@ validate_shadowing(struct object *ob)
 	error("shadow: Can't shadow when shadowed.\n");
     if (current_object->super)
 	error("The shadow must not reside inside another object.\n");
-    if (ob == master_ob)
-	error("shadow: cannot shadow the master object.\n");
     if (ob->shadowing || current_object == ob)
 	error("Can't shadow a shadow.\n");
 
@@ -987,9 +1021,6 @@ validate_shadowing(struct object *ob)
 	struct program *progp = victim->inherit[inh].prog;
 	int fun;
 
-#ifdef USE_SWAP
-	access_program(progp);
-#endif
 	if (progp->flags & PRAGMA_NO_SHADOW)
 	    return 0;
 	for (fun = progp->num_functions - 1; fun >= 0; fun--) 
@@ -1045,7 +1076,7 @@ check_for_destr(struct svalue *arg)
     case T_FUNCTION:
 	v = arg->u.func->funargs;
 	goto arrtest;
-    case T_ARRAY:
+    case T_POINTER:
 	v = arg->u.vec;
     arrtest:
 	for (i = 0; i < v->size; i++) 
@@ -1123,12 +1154,13 @@ check_for_destr(struct svalue *arg)
  * arguments.
  */
 #ifdef TRACE_CODE
-#define TRACE_SIZE 20000
-int previous_instruction[TRACE_SIZE];
+#define TRACE_SIZE 0x400
+unsigned int previous_instruction[TRACE_SIZE];
+struct program *previous_prog[TRACE_SIZE];
 int stack_size[TRACE_SIZE];
-char *previous_pc[TRACE_SIZE];
+unsigned int previous_pc[TRACE_SIZE];
 int curtracedepth[TRACE_SIZE];
-static int last;
+static unsigned int last;
 #endif
 /*static int num_arg; */
 extern char *string_print_formatted (int , char *, int, struct svalue *);
@@ -1147,28 +1179,21 @@ extern struct vector *intersect_array (struct vector*,struct vector*);
 extern struct vector *make_unique (struct vector *arr, struct closure *fun, struct svalue *skipnum);
 static void eval_instruction(char *);
 
-#if defined(RUSAGE) && defined(PROFILE_OBJS)
-#define MAX_CPU_STACK 1000
-static int progcpui;
-static struct progcpuS { /* no good idea to do this with a list */
-    struct program *prog;      /* an array is much faster... */
-    long cpu;
-} progcpu[MAX_CPU_STACK];
-	    
-void
-clear_cpu_stack() 
-{ 
-    progcpui = 1; 
-    progcpu[0].prog = 0;
-    progcpu[0].cpu = (-1);
-}
-#endif
 
+static unsigned short read_short(char *addr)
+{
+    unsigned short ret;
+
+    ((char *)&ret)[0] = ((char *)addr)[0];
+    ((char *)&ret)[1] = ((char *)addr)[1];
+
+    return ret;
+}
 /* ARGSUSED */
 static void
 f_last_reference_time(int xxx)
 {
-    push_number((int)previous_ob_access_time);
+    push_number((long long)previous_ob_access_time);
 }
 
 /* ARGSUSED */
@@ -1214,9 +1239,6 @@ f_call_virt(int xxx)
     }
     else
     {
-#ifdef USE_SWAP
-	access_program(current_prog->inherit[fiix].prog);
-#endif
 	func = current_prog->inherit[fiix].prog->functions[fix].name;
 	(void)s_f_f(func, current_object->prog);
 	if (function_type_mod_found & TYPE_MOD_PRIVATE &&
@@ -1225,14 +1247,11 @@ f_call_virt(int xxx)
 	    error("Attempted call of private function.\n");
     }
 
-#ifdef USE_SWAP
-    access_program(function_prog_found);
-#endif
     funp = &(function_prog_found->functions[function_index_found]);
     /* Urgle. There should probably be a function for all this. |D| 
      * See call-self for comments 
      */
-    push_control_stack (funp);
+    push_control_stack (current_object, function_prog_found, funp);
     inh_offset = function_inherit_found;
     current_prog = function_prog_found;
     csp->ext_call = 0;
@@ -1240,35 +1259,6 @@ f_call_virt(int xxx)
     pc = setup_new_frame(funp);
     csp->extern_call = 0;
     
-#if defined(RUSAGE) && defined(PROFILE_OBJS)
-    {
-#ifdef SOLARIS
-	struct tms buffer;
-#else
-	struct rusage rus;
-#endif
-	long cpu;
-	
-#ifdef SOLARIS
-	if (times(&buffer) != -1)
-	    cpu = (buffer.tms_utime + buffer.tms_stime);
-#else
-	if (getrusage(RUSAGE_SELF, &rus) >= 0) 
-	{                           
-	    cpu = rus.ru_utime.tv_sec * 1000 + rus.ru_utime.tv_usec / 1000 +
-		rus.ru_stime.tv_sec * 1000 + rus.ru_stime.tv_usec / 1000; 
-	}
-#endif
-	else
-	    cpu = (-1);
-	
-	if (progcpui >= MAX_CPU_STACK) 
-	    fatal("CPU-Stack overflow.\n");
-	
-	progcpu[progcpui].prog = current_prog;
-	progcpu[progcpui++].cpu = cpu;
-    }	
-#endif
 }
 
 static void
@@ -1292,21 +1282,14 @@ f_call_self(int num_arg)
 
     free_svalue(arg);
     num_arg--;
-#if defined(sun) && !defined(SOLARIS)
-    (void)bcopy(&arg[1], arg, num_arg * sizeof(struct svalue));
-#else
     (void)memmove(arg, &arg[1], num_arg * sizeof(struct svalue));
-#endif
     sp--;
     
-#ifdef USE_SWAP
-    access_program(function_prog_found);
-#endif
     funp = &(function_prog_found->functions[function_index_found]);
     /* Urgle. There should probably be a function for all this. |D| 
      * See call-self for comments 
      */
-    push_control_stack (funp);
+    push_control_stack (current_object, function_prog_found, funp);
     inh_offset = function_inherit_found;
     current_prog = function_prog_found;
     csp->ext_call = 0;
@@ -1314,35 +1297,6 @@ f_call_self(int num_arg)
     pc = setup_new_frame(funp);
     csp->extern_call = 0;
     
-#if defined(RUSAGE) && defined(PROFILE_OBJS)
-    {
-#ifdef SOLARIS
-	struct tms buffer;
-#else
-	struct rusage rus;
-#endif
-	long cpu;
-	
-#ifdef SOLARIS
-	if (times(&buffer) != -1)
-	    cpu = (buffer.tms_utime + buffer.tms_stime);
-#else
-	if (getrusage(RUSAGE_SELF, &rus) >= 0) 
-	{                           
-	    cpu = rus.ru_utime.tv_sec * 1000 + rus.ru_utime.tv_usec / 1000 +
-		rus.ru_stime.tv_sec * 1000 + rus.ru_stime.tv_usec / 1000; 
-	}
-#endif
-	else
-	    cpu = (-1);
-	
-	if (progcpui >= MAX_CPU_STACK) 
-	    fatal("CPU-Stack overflow.\n");
-	
-	progcpu[progcpui].prog = current_prog;
-	progcpu[progcpui++].cpu = cpu;
-    }	
-#endif
 }
 
 /* ARGSUSED */
@@ -1390,51 +1344,18 @@ f_call_non_virt(int xxx)
     pc++;
     inh = fiix - (current_prog->num_inherited - 1);
     function_prog_found = current_prog->inherit[fiix].prog;
-#ifdef USE_SWAP
-    access_program(function_prog_found);
-#endif
     funp = &(function_prog_found->functions[fix]);
     
     /* Urgle. There should probably be a function for all this. |D| 
      * See call-self for comments 
      */
-    push_control_stack (funp);
+    push_control_stack (current_object, function_prog_found, funp);
     inh_offset += inh;
     current_prog = function_prog_found;
     csp->ext_call = 0;
     csp->num_local_variables = num_arg;
     pc = setup_new_frame(funp);
-    csp->extern_call = 0;
-    
-#if defined(RUSAGE) && defined(PROFILE_OBJS)
-    {
-#ifdef SOLARIS
-	struct tms buffer;
-#else
-	struct rusage rus;
-#endif
-	long cpu;
-	
-#ifdef SOLARIS
-	if (times(&buffer) != -1)
-	    cpu = (buffer.tms_utime + buffer.tms_stime);
-#else
-	if (getrusage(RUSAGE_SELF, &rus) >= 0) 
-	{                           
-	    cpu = rus.ru_utime.tv_sec * 1000 + rus.ru_utime.tv_usec / 1000 +
-		rus.ru_stime.tv_sec * 1000 + rus.ru_stime.tv_usec / 1000; 
-	}
-#endif
-	else
-	    cpu = (-1);
-	
-	if (progcpui >= MAX_CPU_STACK) 
-	    fatal("CPU-Stack overflow.\n");
-	
-	progcpu[progcpui].prog = current_prog;
-	progcpu[progcpui++].cpu = cpu;
-    }	
-#endif
+    csp->extern_call = 0;    
 }
 
 /* ARGSUSED */
@@ -1442,26 +1363,8 @@ static void
 f_call_c(int num_arg)
 {
     void (*func)(struct svalue *);
-    int f1 = 0;
-#ifdef __alpha
-    int f2 = 0;
-#endif
-    
-    ((char *)&f1)[0] = pc[0];
-    ((char *)&f1)[1] = pc[1];
-    ((char *)&f1)[2] = pc[2];
-    ((char *)&f1)[3] = pc[3];
-    pc += 4;
-#ifdef __alpha
-    ((char *)&f2)[0] = pc[0];
-    ((char *)&f2)[1] = pc[1];
-    ((char *)&f2)[2] = pc[2];
-    ((char *)&f2)[3] = pc[3];
-    pc += 4;
-    func = (void (*)(struct svalue *))((long)f1 | ((long)f2 << 32));
-#else
-    func = (void (*)(struct svalue *))f1;
-#endif
+    memcpy(&func, pc, sizeof(func));
+    pc += sizeof(func);
     func(fp);
 }
 
@@ -1485,10 +1388,7 @@ f_call_simul(int xxx)
 	current_prog == simul_efun_ob->prog ||
 	!apply_low(func, simul_efun_ob, num_arg, 1))
     {
-	char buff[200];
-	(void)sprintf(buff, "Simulated efun %s not found", 
-		      current_prog->rodata + func_name_index);
-	error (buff);
+	error ("Simulated efun %s not found", current_prog->rodata + func_name_index);
     }
 }
 
@@ -1496,7 +1396,7 @@ f_call_simul(int xxx)
 static void
 f_previous_object(int num_arg)
 {
-    int n;
+    long long n;
     struct control_stack *cspi;
 
     if (sp->u.number > 0 || (sp->u.number == 0 &&
@@ -1528,7 +1428,7 @@ f_previous_object(int num_arg)
 static void
 f_calling_program(int num_arg)
 {
-    int n = sp->u.number;
+    long long n = sp->u.number;
     struct control_stack *cspi;
 
     pop_stack();
@@ -1548,7 +1448,7 @@ f_calling_program(int num_arg)
 static void
 f_calling_object(int num_arg)
 { 
-    int n = sp->u.number;
+    long long n = sp->u.number;
     struct control_stack *cspi;
     
     pop_stack();
@@ -1569,7 +1469,7 @@ f_calling_object(int num_arg)
 static void
 f_calling_function(int num_arg)
 {
-    int n = sp->u.number;
+    long long n = sp->u.number;
     struct control_stack *cspi;
 
     pop_stack();
@@ -1648,13 +1548,6 @@ static void
 f_else(int num_arg)
 {
     fatal("f_else should not be called.\n");
-}
-
-/* ARGSUSED */
-static void
-f_describe(int num_arg)
-{
-    fatal("f_describe should not be called.\n");
 }
 
 /* ARGSUSED */
@@ -1792,17 +1685,31 @@ f_default(int num_arg)
 
 /* ARGSUSED */
 static void
+f_m_delkey(int num_arg)
+{
+  remove_from_mapping(sp[-1].u.map, sp);
+  pop_n_elems(2);
+  push_number(0);
+}
+
+/* ARGSUSED */
+static void
 f_itof(int num_arg)
 {
     sp->type = T_FLOAT;
     sp->u.real = sp->u.number;
 }
 
+#ifndef LLONG_MAX
+#define LLONG_MAX ((long long)(~(unsigned long long)0 >> 1))
+#define LLONG_MIN (~LLONG_MAX)
+#endif
+
 /* ARGSUSED */
 static void
 f_ftoi(int num_arg)
 {
-    if (sp->u.real > INT_MAX || sp->u.real < INT_MIN)
+    if (sp->u.real > LLONG_MAX || sp->u.real < LLONG_MIN)
 	error("Integer overflow.\n");
     sp->type = T_NUMBER;
     sp->u.number = sp->u.real;
@@ -1812,6 +1719,7 @@ f_ftoi(int num_arg)
 static void
 f_sin(int num_arg)
 {
+    /* CHECK result */
     sp->u.real = sin(sp->u.real);
 }
 
@@ -1826,25 +1734,29 @@ f_cos(int num_arg)
 static void
 f_tan(int num_arg)
 {
-    sp->u.real = chkfloatrange(tan(sp->u.real));
+    sp->u.real = tan(sp->u.real);
 }
 
 /* ARGSUSED */
 static void
 f_asin(int num_arg)
 {
-    if (fabs(sp->u.real) > 1.0)
-	error("Argument out of bounds to asin()\n");
-    sp->u.real = asin(sp->u.real);
+    double arg = sp->u.real;
+    errno = 0;
+    sp->u.real = asin(arg);
+    if (errno)
+        error("Argument %.18g to asin() is out of bounds.\n", arg);
 }
 
 /* ARGSUSED */
 static void
 f_acos(int num_arg)
 {
-    if (fabs(sp->u.real) > 1.0)
-	error("Argument out of bounds to acos()\n");
-    sp->u.real = acos(sp->u.real);
+    double arg = sp->u.real;
+    errno = 0;
+    sp->u.real = acos(arg);
+    if (errno)
+        error("Argument %.18g to acos() is out of bounds.\n", arg);
 }
 
 /* ARGSUSED */
@@ -1866,21 +1778,29 @@ f_atan2(int num_arg)
 static void
 f_exp(int num_arg)
 {
-    sp->u.real = chkfloatrange(exp(sp->u.real));
+    double arg = sp->u.real;
+    errno = 0;
+    sp->u.real = exp(arg);
+    if (errno)
+        error("Argument %.18g to exp() is out of bounds.\n", arg);
 }
 
 /* ARGSUSED */
 static void
 f_log(int num_arg)
 {
-    sp->u.real = chkfloatrange(log(sp->u.real));
+    sp->u.real = log(sp->u.real);
 }
 
 /* ARGSUSED */
 static void
 f_pow(int num_arg)
 {
-    (sp-1)->u.real = chkfloatrange(pow((sp-1)->u.real, sp->u.real));
+    double arg1 = (sp-1)->u.real, arg2 = sp->u.real;
+    errno = 0;
+    (sp-1)->u.real = pow(arg1, arg2);
+    if (errno)
+        error("Arguments %.18g and %.18g to pow() are out of bounds.\n", arg1, arg2);
     sp--;
 }
 
@@ -1888,81 +1808,105 @@ f_pow(int num_arg)
 static void
 f_sinh(int num_arg)
 {
-    sp->u.real = chkfloatrange(sinh(sp->u.real));
+    double arg = sp->u.real;
+    errno = 0;
+    sp->u.real = sinh(arg);
+    if (errno)
+        error("Argument %.18g to sinh() is out of bounds.\n", arg);
 }
 
 /* ARGSUSED */
 static void
 f_cosh(int num_arg)
 {
-    sp->u.real = chkfloatrange(cosh(sp->u.real));
+    double arg = sp->u.real;
+    errno = 0;
+    sp->u.real = cosh(arg);
+    if (errno)
+        error("Argument %.18g to cosh() is out of bounds.\n", arg);
 }
 
 /* ARGSUSED */
 static void
 f_tanh(int num_arg)
 {
-    sp->u.real = chkfloatrange(tanh(sp->u.real));
+    double arg = sp->u.real;
+    errno = 0;
+    sp->u.real = tanh(arg);
+    if (errno)
+        error("Argument %.18g to tanh() is out of bounds.\n", arg);
 }
 
-#ifdef F_ASINH
 /* ARGSUSED */
 static void
 f_asinh(int num_arg)
 {
-    sp->u.real = chkfloatrange(asinh(sp->u.real));
+    double arg = sp->u.real;
+    errno = 0;
+    sp->u.real = asinh(arg);
+    if (errno)
+        error("Argument %.18g to asinh() is out of bounds.\n", arg);
 }
-#endif
 
-#ifdef F_ACOSH
 /* ARGSUSED */
 static void
 f_acosh(int num_arg)
 {
-    if (sp->u.real < 1.0)
-	error("Argument out of bounds to acosh()\n");
-    sp->u.real = chkfloatrange(acosh(sp->u.real));
+    double arg = sp->u.real;
+    errno = 0;
+    sp->u.real = acosh(arg);
+    if (errno)
+        error("Argument %.18g to acosh() is out of bounds.\n", arg);
 }
-#endif
 
-#ifdef F_ATANH
 /* ARGSUSED */
 static void
 f_atanh(int num_arg)
 {
-    if (fabs(sp->u.real) > 1.0)
-	error("Argument out of bounds to atanh()\n");
-    sp->u.real = chkfloatrange(atanh(sp->u.real));
+    double arg = sp->u.real;
+    errno = 0;
+    sp->u.real = atanh(arg);
+    if (errno)
+        error("Argument %.18g to atanh() is out of bounds.\n", arg);
 }
-#endif
 
 /* ARGSUSED */
 static void
 f_abs(int num_arg)
 {
-    sp->u.real = fabs(sp->u.real);
+    if (sp->type == T_NUMBER)
+        sp->u.number = llabs(sp->u.number);
+    else if (sp->type == T_FLOAT)
+        sp->u.real = fabs(sp->u.real);
+    else
+        bad_arg(1, F_ABS, sp);
 }
 
 /* ARGSUSED */
 static void
 f_fact(int num_arg)
 {
-    if ( sp->u.real < 0.0)
-	error("Argument out of bounds to fact()\n");
-#ifdef ns32000
-    sp->u.real = chkfloatrange(exp(gamma(sp->u.real + 1.0)));
-#else	    
-    sp->u.real = chkfloatrange(exp(lgamma(sp->u.real + 1.0)));
-#endif
+    double arg = sp->u.real;
+    errno = 0;
+    sp->u.real = signgam * exp(lgamma(sp->u.real + 1.0));
+    if (errno)
+        error("Argument %.18g to exp() is out of bounds.\n", arg);
 }
 
 /* ARGSUSED */
 static void
 f_rnd(int num_arg)
 {
-    extern double random_float(void);
+    extern double random_float(int, char *);
 
-    push_float(random_float());
+    if (num_arg > 0)
+    {
+	long long seed = sp->u.number;
+	pop_stack();
+	push_float(random_float(sizeof(seed), (char *)&seed));
+    }
+    else
+	push_float(random_float(0, NULL));
 }
 
 /* ARGSUSED */
@@ -1970,7 +1914,7 @@ static void
 f_nrnd(int num_arg)
 {
     double x1, x2, w, m = 0.0, s = 1.0;
-    extern double random_float(void);
+    extern double random_float(int, char *);
 
     switch (num_arg)
     {
@@ -1985,13 +1929,13 @@ f_nrnd(int num_arg)
 
     do
     {
-	x1 = 2.0 * random_float() - 1.0;
-	x2 = 2.0 * random_float() - 1.0;
+	x1 = 2.0 * random_float(0, NULL) - 1.0;
+	x2 = 2.0 * random_float(0, NULL) - 1.0;
 	w = (x1 * x1) + (x2 * x2);
     }
-    while (w >= 1.0);
+    while (w >= 1.0 || w == 0.0);
 
-    w = sqrt((-2.0 * log(w)) / w);
+    w = sqrt((-2.0 * logl(w)) / w);
 
     push_float(m + x1 * w * s);
 }
@@ -2002,7 +1946,7 @@ f_ftoa(int num_arg)
 {
     char buffer[1024];
 
-    (void)sprintf(buffer,"%.8g",sp->u.real);
+    (void)sprintf(buffer,"%.18g",sp->u.real);
     sp--;
     push_string(buffer, STRING_MSTRING);
 }
@@ -2011,14 +1955,61 @@ f_ftoa(int num_arg)
 static void
 f_floatc(int num_arg)
 {
-    float f;
+    double f;
 
-    ((char *)&f)[0] = pc[0];
-    ((char *)&f)[1] = pc[1];
-    ((char *)&f)[2] = pc[2];
-    ((char *)&f)[3] = pc[3];
-    pc += 4;
+    memcpy(&f, pc, sizeof(f));
+    pc += sizeof(f);
     push_float(f);
+}
+
+/* ARGSUSED */
+static void
+f_reduce(int argnum)
+{
+    struct svalue  *argval;
+
+    argval = sp - argnum + 1;
+
+    if (argval[1].type == T_POINTER)
+    {
+        struct   vector  *arrval;
+	struct   svalue   retval;
+	register int      arrlen,  number;
+
+	arrval = argval[1].u.vec;
+	arrlen = arrval->size;
+
+	if (argnum == 3)
+        {
+	    push_svalue(&argval[2]);
+	    number = -1;
+        }
+	else if (arrlen)
+        {
+	    push_svalue(&arrval->item[0]);
+	    number = 0;
+        }
+	else
+        {
+	    push_svalue(&const0);
+	    number = -1;
+        }
+
+	while (++number < arrlen)
+        {
+	    push_svalue(&arrval->item[number]);
+	    call_var(2, argval[0].u.func);
+        }
+
+	assign_svalue_no_free(&retval, sp);
+	pop_n_elems(argnum + 1);
+	*(++sp) = retval;
+    }
+    else
+    {
+        pop_n_elems(argnum);
+	push_svalue(&const0);
+    }
 }
 
 /* ARGSUSED */
@@ -2257,16 +2248,6 @@ f_return(int num_arg)
     fatal("f_return should not be called.\n");
 }
 
-#ifdef DEBUG
-/* ARGSUSED */
-static void
-f_break_point(int num_arg)
-{
-    break_point();
-    push_number(0);
-}
-#endif
-
 static void 
 f_break_string(int num_arg)
 {
@@ -2413,18 +2394,26 @@ f_find_object(int num_arg)
 static void
 f_wildmatch(int num_arg)
 {
-    int i;
-
-    i = wildmat(sp->u.string, (sp-1)->u.string);
-    pop_n_elems(2);
-    push_number(i);
+    if (sp->type == T_NUMBER)
+    {
+        pop_n_elems(2);
+        push_number(0);
+    }
+    else
+    {
+        int  i;
+    
+        i = wildmat(sp->u.string, (sp-1)->u.string);
+        pop_n_elems(2);
+        push_number(i);
+    }
 }
 
 /* ARGSUSED */
 static void
 f_write_file(int num_arg)
 {
-    int i;
+    long long i;
 
     i = write_file((sp-1)->u.string, sp->u.string);
     pop_n_elems(2);
@@ -2436,7 +2425,7 @@ f_read_file(int num_arg)
 {
     char *str;
     struct svalue *arg = sp- num_arg + 1;
-    int start = 0, len = 0;
+    long long start = 0, len = 0;
 
     if (num_arg > 1)
 	start = arg[1].u.number;
@@ -2452,8 +2441,7 @@ f_read_file(int num_arg)
     if (str == 0)
 	push_number(0);
     else {
-	push_mstring(make_mstring(str));
-	free(str);
+	push_mstring(str);
     }
 }
 
@@ -2462,8 +2450,8 @@ f_read_bytes(int num_arg)
 {
     char *str;
     struct svalue *arg = sp- num_arg + 1;
-    int start = 0;
-    size_t len = 0;
+    long long start = 0;
+    long long len = 0;
 
     if (num_arg > 1)
 	start = arg[1].u.number;
@@ -2480,8 +2468,7 @@ f_read_bytes(int num_arg)
 	push_number(0);
     else
     {
-	push_mstring(make_mstring(str));
-	free(str);
+	push_mstring(str);
     }
 }
 
@@ -2502,7 +2489,7 @@ f_write_bytes(int num_arg)
 static void
 f_file_size(int num_arg)
 {
-    int i;
+    long long i;
 
     i = file_size(sp->u.string);
     pop_stack();
@@ -2513,7 +2500,7 @@ f_file_size(int num_arg)
 static void
 f_file_time(int num_arg)
 {
-    int i;
+    long long i;
 
     i = file_time(sp->u.string);
     pop_stack();
@@ -2571,11 +2558,11 @@ f_find_player(int num_arg)
 static void 
 f_write_socket(int num_arg)
 {
+    char tmpbuf[48];
+    
     if (sp->type == T_NUMBER)
     {
-	char tmpbuf[10];
-
-	(void)sprintf(tmpbuf, "%d", sp->u.number);
+	snprintf(tmpbuf, sizeof(tmpbuf), "%lld", sp->u.number);
 	if (current_object->interactive)
 	    write_socket(tmpbuf, current_object);
 	else if (current_object == master_ob)
@@ -2637,7 +2624,7 @@ f_restore_map(int num_arg)
 static void
 f_restore_object(int num_arg)
 {
-    int i;
+    long long i;
 
     i = restore_object(current_object, sp->u.string);
     pop_stack();
@@ -2726,13 +2713,7 @@ f_set_auth(int num_arg)
 	push_number(0);
 	return;
     }
-#ifdef USE_SWAP
-    access_object(arg->u.ob);
-#endif
     assign_svalue(&(arg->u.ob->variables[-1]), ret);
-#ifdef USE_SWAP
-    access_object(current_object);
-#endif
     pop_n_elems(2);
     push_number(0);
 }
@@ -2745,12 +2726,9 @@ f_query_auth(int num_arg)
     struct object *ob = sp->u.ob;
 
     pop_stack();
-#ifdef USE_SWAP
-    access_object(ob);
-#endif
     switch(ob->variables[-1].type)
     {
-    case T_ARRAY:
+    case T_POINTER:
 	push_vector(allocate_array(ob->variables[-1].u.vec->size), FALSE);
 	for(i = 0; i < ob->variables[-1].u.vec->size; i++)
 	    assign_svalue_no_free(&(sp->u.vec->item[i]),
@@ -2764,9 +2742,6 @@ f_query_auth(int num_arg)
 	push_svalue(&(ob->variables[-1]));
 	break;
     }
-#ifdef USE_SWAP
-    access_object(current_object);
-#endif
 }
 
 /* ARGSUSED */
@@ -2838,7 +2813,7 @@ f_filter(int num_arg)
     } else
 	error("Bad arguments to filter\n");
 
-    if (arg[0].type == T_ARRAY) {
+    if (arg[0].type == T_POINTER) {
 	struct vector *res;
 	check_for_destr(&arg[0]);
 	res = filter_arr(arg[0].u.vec, arg[1].u.func);
@@ -2872,7 +2847,9 @@ f_set_bit(int num_arg)
     int ind;
 
     if (sp->u.number > MAX_BITS)
-	error("set_bit: too big bit number: %d\n", sp->u.number);
+	error("set_bit: too big bit number: %lld\n", sp->u.number);
+    if (sp->u.number < 0)
+	error("set_bit: negative bit number: %lld\n", sp->u.number);
     len = strlen((sp-1)->u.string);
     old_len = len;
     ind = sp->u.number/6;
@@ -2900,7 +2877,9 @@ f_clear_bit(int num_arg)
     int ind;
 
     if (sp->u.number > MAX_BITS)
-	error("clear_bit: too big bit number: %d\n", sp->u.number);
+	error("clear_bit: too big bit number: %lld\n", sp->u.number);
+    if (sp->u.number < 0)
+	error("clear_bit: negative bit number: %lld\n", sp->u.number);
     len = strlen((sp-1)->u.string);
     ind = sp->u.number/6;
     if (ind >= len) {
@@ -2923,6 +2902,11 @@ f_test_bit(int num_arg)
 {
     int len;
 
+    if (sp->u.number > MAX_BITS)
+	error("test_bit: too big bit number: %lld\n", sp->u.number);
+    if (sp->u.number < 0)
+	error("test_bit: negative bit number: %lld\n", sp->u.number);
+
     len = strlen((sp-1)->u.string);
     if (sp->u.number/6 >= len) {
 	pop_n_elems(2);
@@ -2936,6 +2920,20 @@ f_test_bit(int num_arg)
 	pop_n_elems(2);
 	push_number(0);
     }
+}
+
+/* ARGSUSED */
+static void
+f_try(int num_arg)
+{
+    fatal("f_try should not be called.\n");
+}
+
+/* ARGSUSED */
+static void
+f_end_try(int num_arg)
+{
+    fatal("f_end_try should not be called.\n");
 }
 
 /* ARGSUSED */
@@ -2969,7 +2967,7 @@ f_throw(int num_arg)
 static void
 f_notify_fail(int num_arg)
 {
-    int pri = 1;
+    long long pri = 1;
 
     if (num_arg == 2)
     {
@@ -2986,7 +2984,7 @@ f_notify_fail(int num_arg)
 static void
 f_query_idle(int num_arg)
 {
-    int i;
+    long long i;
 
     i = query_idle(sp->u.ob);
     pop_stack();
@@ -3020,8 +3018,7 @@ f_implode(int num_arg)
     str = implode_string((sp-1)->u.vec, sp->u.string);
     pop_n_elems(2);
     if (str) {
-	push_mstring(make_mstring(str));
-	free(str);
+	push_mstring(str);
     } else {
 	push_number(0);
     }
@@ -3152,7 +3149,7 @@ f_deep_inventory(int num_arg)
     else
 	vec = deep_inventory(sp->u.ob, 0);
     free_svalue(sp);
-    sp->type = T_ARRAY;
+    sp->type = T_POINTER;
     sp->u.vec = vec;
 }
 
@@ -3181,29 +3178,22 @@ f_object_clones(int num_arg)
     struct vector *v;
     struct object *ob;
     int i;
-
+    int num_clones;
+    
     if (sp->type == T_NUMBER)
 	v = allocate_array(0);
     else
     {
-      ob = obj_list;
-      i = 0;
-	do
-	{
-	    if (ob->prog == sp->u.ob->prog && (ob->flags & O_CLONE))
-		i++;
-	} while ((ob = ob->next_all) != obj_list);
-        v = allocate_array(i);
-	ob = obj_list;
-        i = 0;
-	do
-	    if (ob->prog == sp->u.ob->prog && (ob->flags & O_CLONE))
-	    {
-		v->item[i].type = T_OBJECT;
-		v->item[i++].u.ob = ob;
-		add_ref(ob,"object_clones");
-	    }
-	while ((ob = ob->next_all) != obj_list) ;
+	ob = sp->u.ob;
+	num_clones = sp->u.ob->prog->num_clones;
+	v = allocate_array(num_clones);
+	for (i = 0, ob = sp->u.ob->prog->clones;
+	     i < num_clones;
+	     i++, ob = ob->next_all) {
+	    v->item[i].type = T_OBJECT;
+	    v->item[i].u.ob = ob;
+	    add_ref(ob, "object_clones");
+	}
     }
     pop_stack();
     push_vector(v, FALSE);
@@ -3221,6 +3211,25 @@ f_commands(int num_arg)
 	vec = get_local_commands(sp->u.ob);
     pop_stack();
     push_vector(vec, FALSE);
+}
+
+/* ARGSUSED */
+static void
+f_typeof(int num_arg)
+{
+    int   retval;
+
+    retval = sp->type;
+
+    pop_stack();
+    push_number(retval);
+}
+
+/* ARGSUSED */
+static void
+f_gettimeofday(int num_arg)
+{
+    push_float(current_time);
 }
 
 /* ARGSUSED */
@@ -3249,14 +3258,14 @@ f_max(int num_arg)
 	break;
 
     default:
-	bad_arg(1, F_MIN, arg0);
+	bad_arg(1, F_MAX, arg0);
 	break;
     }
 
     for (i = 1; i < num_arg; i++)
     {
 	if (maxp->type != argn->type)
-	    bad_arg(i + 1, F_MIN, arg0 + i);
+	    bad_arg(i + 1, F_MAX, arg0 + i);
 
 	switch (arg0->type)
 	{
@@ -3344,8 +3353,6 @@ f_min(int num_arg)
 static void
 f_add(int num_arg)
 {
-    int i;
-
     /*if (inadd==0) checkplus(p);*/
     if ((sp-1)->type == T_STRING && sp->type == T_STRING)
     {
@@ -3359,8 +3366,8 @@ f_add(int num_arg)
     }
     else if ((sp-1)->type == T_NUMBER && sp->type == T_STRING)
     {
-	char buff[20], *res;
-	(void)sprintf(buff, "%d", (sp-1)->u.number);
+	char buff[60], *res;
+	(void)sprintf(buff, "%lld", (sp-1)->u.number);
 	res = allocate_mstring(strlen(sp->u.string) + strlen(buff));
 	(void)strcpy(res, buff);
 	(void)strcat(res, sp->u.string);
@@ -3369,9 +3376,9 @@ f_add(int num_arg)
     }
     else if (sp->type == T_NUMBER && (sp-1)->type == T_STRING)
     {
-	char buff[20];
+	char buff[60];
 	char *res;
-	(void)sprintf(buff, "%d", sp->u.number);
+	(void)sprintf(buff, "%lld", sp->u.number);
 	res = allocate_mstring(strlen((sp-1)->u.string) + strlen(buff));
 	(void)strcpy(res, (sp-1)->u.string);
 	(void)strcat(res, buff);
@@ -3380,16 +3387,15 @@ f_add(int num_arg)
     }
     else if ((sp-1)->type == T_NUMBER && sp->type == T_NUMBER)
     {
-	i = sp->u.number + (sp-1)->u.number;
+	(sp-1)->u.number += sp->u.number;
 	sp--;
-	sp->u.number = i;
     }
     else if ((sp-1)->type == T_FLOAT && sp->type == T_FLOAT)
     {
 	FLOATASGOP((sp-1)->u.real, += , sp->u.real);
 	sp--;
     } 
-    else if ((sp-1)->type == T_ARRAY && sp->type == T_ARRAY)
+    else if ((sp-1)->type == T_POINTER && sp->type == T_POINTER)
     {
 	struct vector *v;
 	check_for_destr(sp-1);
@@ -3409,7 +3415,7 @@ f_add(int num_arg)
     }
     else
     {
-	error("Bad type of arg to '+'\n");
+        bad_arg_op(F_ADD, sp - 1, sp);
     }
 }
 
@@ -3417,9 +3423,8 @@ f_add(int num_arg)
 static void
 f_subtract(int num_arg)
 {
-    int i;
 
-    if ((sp-1)->type == T_ARRAY && sp->type == T_ARRAY) 
+    if ((sp-1)->type == T_POINTER && sp->type == T_POINTER) 
     {
 	struct vector *v;
 
@@ -3445,25 +3450,21 @@ f_subtract(int num_arg)
     if ((sp-1)->type == T_FLOAT && sp->type == T_FLOAT) 
     {
 	FLOATASGOP((sp-1)->u.real, -= , sp->u.real);
-	pop_stack();
+	sp--;
 	return;
     }
-    if ((sp-1)->type != T_NUMBER)
-	bad_arg(1, F_SUBTRACT, sp-1);
-    if (sp->type != T_NUMBER)
-	bad_arg(2, F_SUBTRACT, sp);
-    i = (sp-1)->u.number - sp->u.number;
-    pop_stack();
-    sp->u.number = i;
+    if ((sp-1)->type != T_NUMBER ||
+        sp->type != T_NUMBER)
+        bad_arg_op(F_SUBTRACT, sp - 1, sp);
+    (sp-1)->u.number -= sp->u.number;
+    sp--;
 }
 
 /* ARGSUSED */
 static void
 f_and(int num_arg)
 {
-    int i;
-
-    if (sp->type == T_ARRAY && (sp-1)->type == T_ARRAY)
+    if (sp->type == T_POINTER && (sp-1)->type == T_POINTER)
     {
 	struct vector *v;
 
@@ -3481,22 +3482,18 @@ f_and(int num_arg)
 	}
 	return;
     }
-    if ((sp-1)->type != T_NUMBER)
-	bad_arg(1, F_AND, sp-1);
-    if (sp->type != T_NUMBER)
-	bad_arg(2, F_AND, sp);
-    i = (sp-1)->u.number & sp->u.number;
-    pop_stack();
-    sp->u.number = i;
+    if ((sp-1)->type != T_NUMBER ||
+	sp->type != T_NUMBER)
+      bad_arg_op(F_AND, sp - 1, sp);
+    (sp-1)->u.number &= sp->u.number;
+    sp--;
 }
 
 /* ARGSUSED */
 static void
 f_or(int num_arg)
 {
-    int i;
-
-    if (sp->type == T_ARRAY && (sp-1)->type == T_ARRAY)
+    if (sp->type == T_POINTER && (sp-1)->type == T_POINTER)
     {
 	struct vector *v;
 
@@ -3513,56 +3510,45 @@ f_or(int num_arg)
 	return;
     }
 
-    if ((sp-1)->type != T_NUMBER)
-	bad_arg(1, F_OR, sp-1);
-    if (sp->type != T_NUMBER)
-	bad_arg(2, F_OR, sp);
-    i = (sp-1)->u.number | sp->u.number;
+    if ((sp-1)->type != T_NUMBER ||
+	sp->type != T_NUMBER)
+	bad_arg_op(F_OR, sp-1, sp);
+    (sp-1)->u.number |= sp->u.number;
     sp--;
-    sp->u.number = i;
 }
 
 /* ARGSUSED */
 static void
 f_xor(int num_arg)
 {
-    int i;
-
-    if ((sp-1)->type != T_NUMBER)
-	bad_arg(1, F_XOR, sp-1);
-    if (sp->type != T_NUMBER)
-	bad_arg(2, F_XOR, sp);
-    i = (sp-1)->u.number ^ sp->u.number;
+    if ((sp-1)->type != T_NUMBER ||
+	sp->type != T_NUMBER)
+      bad_arg_op(F_XOR, sp-1, sp);
+    (sp-1)->u.number ^= sp->u.number;
     sp--;
-    sp->u.number = i;
 }
 
 /* ARGSUSED */
 static void
 f_lsh(int num_arg)
 {
-    int i;
-
-    if ((sp-1)->type != T_NUMBER)
-	bad_arg(1, F_LSH, sp-1);
-    if (sp->type != T_NUMBER)
-	bad_arg(2, F_LSH, sp);
-    i = (sp-1)->u.number << sp->u.number;
+    if ((sp-1)->type != T_NUMBER ||
+	sp->type != T_NUMBER)
+      bad_arg_op(F_LSH, sp-1, sp);
+    (sp-1)->u.number <<= sp->u.number;
     sp--;
-    sp->u.number = i;
 }
 
 /* ARGSUSED */
 static void
 f_rsh(int num_arg)
 {
-    int i;
+    long long i;
 
-    if ((sp-1)->type != T_NUMBER)
-	bad_arg(1, F_RSH, sp-1);
-    if (sp->type != T_NUMBER)
-	bad_arg(2, F_RSH, sp);
-    i = (int)((unsigned)(sp-1)->u.number >> sp->u.number);
+    if ((sp-1)->type != T_NUMBER ||
+	sp->type != T_NUMBER)
+      bad_arg_op(F_RSH, sp-1, sp);
+    i = (long long)((unsigned long long)(sp-1)->u.number >> sp->u.number);
     sp--;	
     sp->u.number = i;
 }
@@ -3571,29 +3557,56 @@ f_rsh(int num_arg)
 static void
 f_multiply(int num_arg)
 {
-    int i;
-
     if ((sp-1)->type == T_FLOAT && sp->type == T_FLOAT)
     {
 	FLOATASGOP((sp-1)->u.real, *= , sp->u.real);
 	sp--;
 	return;
     }
-    if ((sp-1)->type != T_NUMBER)
-	bad_arg(1, F_MULTIPLY, sp-1);
-    if (sp->type != T_NUMBER)
-	bad_arg(2, F_MULTIPLY, sp);
-    i = (sp-1)->u.number * sp->u.number;
-    sp--;
-    sp->u.number = i;
+    if ((sp-1)->type == T_NUMBER) {
+	if (sp->type == T_NUMBER) {
+            (sp-1)->u.number *= sp->u.number;
+            sp--;
+            return;
+        }
+        else if (sp->type == T_STRING) {
+            char *result = multiply_string(sp->u.string, (sp-1)->u.number);
+	    pop_stack();
+	    pop_stack();
+	    push_string(result, STRING_MSTRING);
+	    return;
+        }
+        else if (sp->type == T_POINTER) {
+	    struct vector *result = multiply_array(sp->u.vec,
+						   (sp-1)->u.number);
+	    pop_stack();
+	    pop_stack();
+	    push_vector(result, 0);
+            return;
+        }
+    } else if ((sp-1)->type == T_POINTER &&
+	       sp->type == T_NUMBER) {
+	    struct vector *result = multiply_array((sp-1)->u.vec,
+						   sp->u.number);
+	    pop_stack();
+	    pop_stack();
+	    push_vector(result, 0);
+            return;
+   } else if ((sp-1)->type == T_STRING &&
+	       sp->type == T_NUMBER) {
+	char *result = multiply_string((sp-1)->u.string, sp->u.number);
+	pop_stack();
+	pop_stack();
+	push_string(result, STRING_MSTRING);
+	return;
+    }
+    bad_arg_op(F_MULTIPLY, sp-1, sp);
 }
 
 /* ARGSUSED */
 static void
 f_divide(int num_arg)
 {
-    int i;
-
     if ((sp-1)->type == T_FLOAT && sp->type == T_FLOAT)
     {
         if (sp->u.real == 0.0)
@@ -3602,39 +3615,41 @@ f_divide(int num_arg)
 	sp--;
 	return;
     }
-    if ((sp-1)->type != T_NUMBER)
-	bad_arg(1, F_DIVIDE, sp-1);
-    if (sp->type != T_NUMBER)
-	bad_arg(2, F_DIVIDE, sp);
+    if ((sp-1)->type != T_NUMBER ||
+	sp->type != T_NUMBER)
+      bad_arg_op(F_DIVIDE, sp-1, sp);
     if (sp->u.number == 0)
 	error("Division by zero\n");
-    i = (sp-1)->u.number / sp->u.number;
+    (sp-1)->u.number /= sp->u.number;
     sp--;
-    sp->u.number = i;
 }
 
 /* ARGSUSED */
 static void
 f_mod(int num_arg)
 {
-    int i;
+    if ((sp-1)->type != sp->type ||
+        (sp->type != T_NUMBER && sp->type != T_FLOAT))
+      bad_arg_op(F_MOD, sp-1, sp);
 
-    if ((sp-1)->type != T_NUMBER)
-	bad_arg(1, F_MOD, sp-1);
-    if (sp->type != T_NUMBER)
-	bad_arg(2, F_MOD, sp);
-    if (sp->u.number == 0)
+    if (sp->type == T_NUMBER) {
+      if (sp->u.number == 0)
 	error("Modulus by zero.\n");
-    i = (sp-1)->u.number % sp->u.number;
+      (sp-1)->u.number %= sp->u.number;
+    } else if (sp->type == T_FLOAT) {
+      errno = 0;
+      (sp-1)->u.real = fmod((sp-1)->u.real, sp->u.real);
+      if (errno)
+	error("Modulus by zero.\n");
+    } 
     sp--;
-    sp->u.number = i;
 }
 
 /* ARGSUSED */
 static void
 f_gt(int num_arg)
 {
-    int i;
+    long long i;
 
     if ((sp-1)->type == T_STRING && sp->type == T_STRING) {
 	i = strcmp((sp-1)->u.string, sp->u.string) > 0;
@@ -3649,10 +3664,9 @@ f_gt(int num_arg)
 	sp->type = T_NUMBER;
 	return;
     }
-    if ((sp-1)->type != T_NUMBER)
-	bad_arg(1, F_GT, sp-1);
-    if (sp->type != T_NUMBER)
-	bad_arg(2, F_GT, sp);
+    if ((sp-1)->type != T_NUMBER ||
+	sp->type != T_NUMBER)
+      bad_arg_op(F_GT, sp-1, sp);
     i = (sp-1)->u.number > sp->u.number;
     sp--;
     sp->u.number = i;
@@ -3662,7 +3676,7 @@ f_gt(int num_arg)
 static void
 f_ge(int num_arg)
 {
-    int i;
+    long long i;
 
     if ((sp-1)->type == T_STRING && sp->type == T_STRING) {
 	i = strcmp((sp-1)->u.string, sp->u.string) >= 0;
@@ -3677,10 +3691,9 @@ f_ge(int num_arg)
 	sp->type = T_NUMBER;
 	return;
     }
-    if ((sp-1)->type != T_NUMBER)
-	bad_arg(1, F_GE, sp-1);
-    if (sp->type != T_NUMBER)
-	bad_arg(2, F_GE, sp);
+    if ((sp-1)->type != T_NUMBER ||
+	sp->type != T_NUMBER)
+      bad_arg_op(F_GE, sp-1, sp);
     i = (sp-1)->u.number >= sp->u.number;
     sp--;
     sp->u.number = i;
@@ -3690,7 +3703,7 @@ f_ge(int num_arg)
 static void
 f_lt(int num_arg)
 {
-    int i;
+    long long i;
 
     if ((sp-1)->type == T_STRING && sp->type == T_STRING) {
 	i = strcmp((sp-1)->u.string, sp->u.string) < 0;
@@ -3705,10 +3718,9 @@ f_lt(int num_arg)
 	sp->type = T_NUMBER;
 	return;
     }
-    if ((sp-1)->type != T_NUMBER)
-	bad_arg(1, F_LT, sp-1);
-    if (sp->type != T_NUMBER)
-	bad_arg(2, F_LT, sp);
+    if ((sp-1)->type != T_NUMBER ||
+	sp->type != T_NUMBER)
+      bad_arg_op(F_LT, sp-1, sp);
     i = (sp-1)->u.number < sp->u.number;
     sp--;
     sp->u.number = i;
@@ -3718,7 +3730,7 @@ f_lt(int num_arg)
 static void
 f_le(int num_arg)
 {
-    int i;
+    long long i;
 
     if ((sp-1)->type == T_STRING && sp->type == T_STRING) {
 	i = strcmp((sp-1)->u.string, sp->u.string) <= 0;
@@ -3733,10 +3745,10 @@ f_le(int num_arg)
 	sp->type = T_NUMBER;
 	return;
     }
-    if ((sp-1)->type != T_NUMBER)
-	bad_arg(1, F_LE, sp-1);
-    if (sp->type != T_NUMBER)
-	bad_arg(2, F_LE, sp);
+    if ((sp-1)->type != T_NUMBER ||
+	sp->type != T_NUMBER)
+      bad_arg_op(F_LE, sp-1, sp);
+
     i = (sp-1)->u.number <= sp->u.number;
     pop_stack();
     sp->u.number = i;
@@ -3781,7 +3793,7 @@ static void
 f_compl(int num_arg)
 {
     if (sp->type != T_NUMBER)
-	error("Bad argument to ~\n");
+      bad_arg(1, F_COMPL, sp);
     sp->u.number = ~ sp->u.number;
 }
 
@@ -3795,7 +3807,7 @@ f_negate(int num_arg)
 	return;
     }
     if (sp->type != T_NUMBER)
-	error("Bad argument to unary minus\n");
+      bad_arg(1, F_NEGATE, sp);
     sp->u.number = - sp->u.number;
 }
 
@@ -3804,9 +3816,9 @@ static void
 f_inc(int num_arg)
 {
     if (sp->type != T_LVALUE)
-	error("Bad argument to ++\n");
+	error("Non-lvalue argument to ++\n");
     if (sp->u.lvalue->type != T_NUMBER)
-	error("++ of non-numeric argument\n");
+      bad_arg(1, F_INC, sp->u.lvalue);
     sp->u.lvalue->u.number++;
     assign_svalue(sp, sp->u.lvalue);
 }
@@ -3816,9 +3828,9 @@ static void
 f_dec(int num_arg)
 {
     if (sp->type != T_LVALUE)
-	error("Bad argument to --\n");
+	error("Non-lvalue argument to --\n");
     if (sp->u.lvalue->type != T_NUMBER)
-	error("-- of non-numeric argument\n");
+      bad_arg(1, F_DEC, sp->u.lvalue);
     sp->u.lvalue->u.number--;
     assign_svalue(sp, sp->u.lvalue);
 }
@@ -3828,9 +3840,9 @@ static void
 f_post_inc(int num_arg)
 {
     if (sp->type != T_LVALUE)
-	error("Bad argument to ++\n");
+	error("Non-lvalue argument to ++\n");
     if (sp->u.lvalue->type != T_NUMBER)
-	error("++ of non-numeric argument\n");
+      bad_arg(1, F_POST_INC, sp->u.lvalue);
     sp->u.lvalue->u.number++;
     assign_svalue(sp, sp->u.lvalue);
     sp->u.number--;
@@ -3841,9 +3853,9 @@ static void
 f_post_dec(int num_arg)
 {
     if (sp->type != T_LVALUE)
-	error("Bad argument to --\n");
+	error("Non-lvalue argument to --\n");
     if (sp->u.lvalue->type != T_NUMBER)
-	error("-- of non-numeric argument\n");
+      bad_arg(1, F_POST_DEC, sp->u.lvalue);
     sp->u.lvalue->u.number--;
     assign_svalue(sp, sp->u.lvalue);
     sp->u.number++;
@@ -3862,12 +3874,12 @@ f_call_other(int num_arg)
     if (arg[0].type == T_NUMBER)
     {
 	if (arg[0].u.number != 0)
-	    error("Bad argument 1 to call_other()\n");
+	  bad_arg(1, F_CALL_OTHER, arg);
 	pop_n_elems(num_arg);
 	push_number(0);
 	return;
     }
-    if (arg[0].type == T_ARRAY)
+    if (arg[0].type == T_POINTER)
     {
 	struct vector *w, *v = allocate_array(num_arg - 2);
 	int i, j;
@@ -3982,7 +3994,7 @@ f_call_other(int num_arg)
 	do_trace("Call other ", buff, "\n");
     }
 #endif
-    
+        
     if (apply_low(arg[1].u.string, ob, num_arg - 2, 1) == 0) 
     {
 	/* Function not found */
@@ -4023,7 +4035,7 @@ f_call_otherv(int xxx)
 static void
 f_object_time(int num_arg)
 {
-    int i;
+    long long i;
 
     if (sp->type == T_OBJECT)
     {
@@ -4058,16 +4070,9 @@ f_objectp(int num_arg)
 
 /* ARGSUSED */
 static void
-f_arrayp(int num_arg)
-{
-    assign_svalue(sp, sp->type == T_ARRAY ? &const1 : &const0);
-}
-
-/* ARGSUSED */
-static void
 f_pointerp(int num_arg)
 {
-    f_arrayp(num_arg);
+    assign_svalue(sp, sp->type == T_POINTER ? &const1 : &const0);
 }
 
 /* ARGSUSED */
@@ -4082,18 +4087,6 @@ static void
 f_floatp(int num_arg)
 {
     assign_svalue(sp, sp->type == T_FLOAT ? &const1 : &const0);
-}
-
-/* ARGSUSED */
-static void
-f_functionp(int num_arg)
-{
-    int ret;
-
-    ret = 0;
-    if (sp->type == T_FUNCTION)
-	ret = legal_closure(sp->u.func);
-    assign_svalue(sp, ret ? &const1 : &const0);
 }
 
 /* ARGSUSED */
@@ -4123,10 +4116,22 @@ f_function_name(int num_arg)
     }
 }
 
+/* ARGSUSED */
+static void
+f_functionp(int num_arg)
+{
+    int ret;
+
+    ret = 0;
+    if (sp->type == T_FUNCTION)
+	ret = legal_closure(sp->u.func);
+    assign_svalue(sp, ret ? &const1 : &const0);
+}
+
 static void
 f_extract(int num_arg)
 {
-    int len, from, to;
+    long long len, from, to;
     struct svalue *arg;
     char *res;
 	    
@@ -4178,10 +4183,10 @@ static void
 f_range(int num_arg)
 {
     if (sp[-1].type != T_NUMBER)
-	error("Bad type of start interval to [ .. ] range.\n");
+      bad_arg(2, F_RANGE, sp - 1);
     if (sp[0].type != T_NUMBER)
-	error("Bad type of end interval to [ .. ] range.\n");
-    if (sp[-2].type == T_ARRAY) {
+      bad_arg(3, F_RANGE, sp);
+    if (sp[-2].type == T_POINTER) {
 	struct vector *v;
 
 	v = slice_array(sp[-2].u.vec, sp[-1].u.number, sp[0].u.number);
@@ -4230,7 +4235,7 @@ f_range(int num_arg)
     }
     else
     {
-	error("Bad argument to [ .. ] range operand.\n");
+      bad_arg(1, F_RANGE, sp - 2);
     }
 }
 
@@ -4308,7 +4313,8 @@ static void
 f_set_alarm(int num_arg)
 {
     struct svalue *arg = sp - num_arg + 1;
-    int delay, reload, ret;
+    double delay, reload;
+    long long ret;
     struct closure *f;
     struct object *ob;
 
@@ -4341,7 +4347,7 @@ f_set_alarm(int num_arg)
 
 	WARNOBSOLETE(current_object, "string as function in set_alarm");
     } else
-	error("Bad arguments to set_alarm\n");
+      bad_arg(3, F_SET_ALARM, arg + 2);
 
     f = arg[2].u.func;
     ob = f->funobj;
@@ -4349,8 +4355,12 @@ f_set_alarm(int num_arg)
 	error("set_alarm can only be called with a local function.");
 
     if (!(ob->flags & O_DESTRUCTED)) {
-	delay = (int) (arg[0].u.real * TIME_RES + 0.5);
-	reload = (int) (arg[1].u.real * TIME_RES + 0.5);
+        delay = 0.0;
+        reload = -1.0;
+        if (arg[0].u.real >= 0.0)
+	    delay = arg[0].u.real;
+        if (arg[1].u.real > 0.0)
+	    reload = arg[1].u.real;
 	ret = new_call_out(f, delay, reload);
     } else
 	ret = 0;
@@ -4364,15 +4374,16 @@ f_set_alarmv(int xxx)
 {
     int num_arg = 4;
     struct svalue *arg = sp - num_arg + 1;
-    int delay, reload, ret;
+    double delay, reload;
+    long long ret;
     struct closure *f;
 
     WARNOBSOLETE(current_object, "set_alarmv");
 
     if (arg[2].type != T_STRING)
-	error("Wrong argument 3 to set_alarm.\n");
-    if (arg[3].type != T_ARRAY)
-	error("Wrong argument 4 to set_alarm.\n");
+      bad_arg(3, F_SET_ALARMV, arg + 2);
+    if (arg[3].type != T_POINTER)
+      bad_arg(4, F_SET_ALARMV, arg + 3);
 
     if (*(arg[2].u.string) == '.')
     {
@@ -4404,8 +4415,12 @@ f_set_alarmv(int xxx)
 
     if (legal_closure(f))
     {
-	delay = (int) (arg[0].u.real * TIME_RES + 0.5);
-	reload = (int) (arg[1].u.real * TIME_RES + 0.5);
+        delay = 0.0;
+        reload = -1.0;
+        if (arg[0].u.real >= 0.0)
+	    delay = arg[0].u.real;
+        if (arg[1].u.real > 0.0)
+	    reload = arg[1].u.real;
 	ret = new_call_out(f, delay, reload);
     } else
 	ret = 0;
@@ -4417,7 +4432,7 @@ f_set_alarmv(int xxx)
 static void
 f_remove_alarm(int num_arg)
 {
-    extern void delete_call(struct object *, int);
+    extern void delete_call(struct object *, long long);
     
     delete_call(current_object, sp->u.number);
 }
@@ -4442,7 +4457,7 @@ static void
 f_get_alarm(int num_arg)
 {
     struct vector *ret;
-    extern struct vector *get_call(struct object *, int);
+    extern struct vector *get_call(struct object *, long long);
     ret = get_call(current_object, sp->u.number);
     pop_stack();
     if (ret)
@@ -4459,14 +4474,17 @@ f_get_alarm(int num_arg)
 static void
 f_set_screen_width(int num_arg)
 {
+    long long col;
+
     if (! current_object->interactive)
 	return;
-    if (sp->u.number < 0 || sp->u.number == 1)
+    col = sp->u.number;
+    if (col < 0 || col == 1|| col > (1 << 30))
 	error("Nonsensical screen width\n");
-    current_object->interactive->screen_width = sp->u.number;
+    current_object->interactive->screen_width = col;
     if (current_object->interactive->current_column >=
-	sp->u.number)
-	current_object->interactive->current_column = sp->u.number - 1;
+	col)
+	current_object->interactive->current_column = col - 1;
 
     /* Return first argument */
 }
@@ -4510,95 +4528,12 @@ f_printf(int num_arg)
     }
 }
 
-
-#ifdef COLOUR_SUPPORT
-static void
-f_enable_colour( int num_arg )
-{
-  struct svalue *arg = sp - num_arg + 1;
-
-  if( !current_object->interactive)
-    return;
-  if( num_arg > 0 && arg[0].u.string != NULL ) {
-    if( !strcmp( arg[0].u.string, "off" ) ) {
-      current_object->interactive->colour_method = 0;
-    } else if ( !strcmp( arg[0].u.string, "ansi" ) ) {
-      current_object->interactive->colour_method = 1;
-    } else if ( !strcmp( arg[0].u.string, "debug" ) ) {
-      current_object->interactive->colour_method = 2;
-    } else if ( !strcmp( arg[0].u.string, "html" ) ) {
-      current_object->interactive->colour_method = 3;
-    } else {
-      error( "Nonsensical colour value\n" );
-    }
-  }
-  if( num_arg > 1 ) {
-    if( arg[ 1 ].u.string == NULL ) {
-      current_object->interactive->default_fg = 0;
-    } else {
-      current_object->interactive->default_fg = arg[ 1 ].u.string[ 0 ];
-    }
-  }
-  if( num_arg > 2 ) {
-    if( arg[ 2 ].u.string == NULL ) {
-      current_object->interactive->default_bg = 0;
-    } else {
-      current_object->interactive->default_bg = arg[ 2 ].u.string[ 0 ];
-    }
-  }
-  pop_n_elems( num_arg );
-  push_number( 0 );
-}
-#endif
-
-#
 /* ARGSUSED */
-void
-strip_ansi( char *from, char *to, int targ_len )
-{
-  int len;
-  int count = 0;
-  while ( *from && count < targ_len) {
-      if( *from == '^' ) {
-        switch( *(from + 1 ) ) {
-          case '=' :
-            for( len=4;len>0;len--) if( *from ) from++;
-            break;
-          case '+' : case '-':
-            for( len=3;len>0;len--) if( *from ) from++;
-            break;
-          case '*' : case 'n' : case 'N':
-            for( len=2;len>0;len--) if( *from ) from++;
-            break;
-          default:
-            if( *(++from) ) {
-              *to++ = *from++;
-              count++;
-            }
-            break;
-        }
-      } else {
-        *to++ = *from++;
-        count++;
-      }
-  }
-  *to = '\0';
-}
-
 static void
-f_strip_ansi(int num_arg)
+f_arrayp(int num_arg)
 {
-    char *str,*to,*from;
-    int  len = 0;
-
-    to = from = str = make_mstring(sp->u.string);
-
-    strip_ansi( from, to, strlen( to ) );
-
-    pop_stack();
-    push_mstring( str );
+    assign_svalue(sp, sp->type == T_ARRAY ? &const1 : &const0);
 }
-
 
 static void
 f_sprintf(int num_arg)
@@ -4734,22 +4669,14 @@ f_snoop(int num_arg)
 }
 
 static void
-f_remove_action(int num_arg)
-{
-    int success;
-    success = remove_action(sp->u.string);
-    pop_n_elems(num_arg);
-    push_number(success);
-}
-
-static void
 f_add_action(int num_arg)
 {
     struct svalue *arg = sp - num_arg + 1;
+    int flag;
 
     if (num_arg == 3) {
 	if (arg[2].type != T_NUMBER)
-	    bad_arg(3, F_ADD_ACTION, &arg[2]);
+	    bad_arg(3, F_ADD_ACTION, arg + 2);
     }
     if (arg[0].type == T_FUNCTION) {
 	;
@@ -4770,11 +4697,17 @@ f_add_action(int num_arg)
 	arg[0].type = T_FUNCTION;
 	arg[0].u.func = fun;	/* and put in a new one */
     } else
-	bad_arg(1, F_ADD_ACTION, &arg[0]);
+	bad_arg(1, F_ADD_ACTION, arg);
 
+    flag = 0;
+    if (num_arg > 2) {
+        if (arg[2].u.number == V_NO_SPACE)
+           flag = V_NO_SPACE;
+        else if (arg[2].u.number != 0)
+           flag = 1;
+    }
     add_action(arg[0].u.func,
-	       num_arg > 1 ? &arg[1] : (struct svalue *)0,
-	       num_arg > 2 ? arg[2].u.number : 0);
+	       num_arg > 1 ? &arg[1] : (struct svalue *)0, flag);
     pop_n_elems(num_arg - 1);
 }
 
@@ -4815,27 +4748,60 @@ f_ed(int num_arg)
 	error("Bad arg to ed()\n");
 }
 
+static char *
+build_salt(int length)
+{
+    char *str;
+    int i;
+    static char *choise = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789./";
+    
+    str = xalloc(length + 1);    
+    for (i = 0; i < length; i++)
+        str[i] = choise[random_number((int)strlen(choise), 0, NULL)];
+
+    if (length > 0)
+        str[length] = '\0';
+    
+    return str;
+}
+
+#define MAX_SALT_LENGTH 16
+
 /* ARGSUSED */
 static void
 f_crypt(int num_arg)
 {
-    char salt[2];
+    char *salt;
     char *res;
-    char *choise =
-	"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789./";
+    int i, count = 0;
+    
+    if (sp->type == T_STRING && strlen(sp->u.string) >= 2)
+    {
+        /* If the string matches. $<id>$ then we add a salt.
+         * If it's $<id>$<salt>$ salt we don't. */
+        for (i = 0; i < strlen(sp->u.string); i++)
+            if (sp->u.string[i] == '$')
+                count++;
 
-    if (sp->type == T_STRING && strlen(sp->u.string) >= 2) {
-	salt[0] = sp->u.string[0];
-	salt[1] = sp->u.string[1];
+        if (count > 1 && count < 3)
+        {
+            salt = xalloc(strlen(sp->u.string) + MAX_SALT_LENGTH + 2);
+            strcpy(salt, sp->u.string);
+            res = build_salt(MAX_SALT_LENGTH);
+            strcat(salt, res);
+            strcat(salt, "$");
+            free(res);
+        } else {
+            salt = xalloc(strlen(sp->u.string) + 1);
+            strcpy(salt, sp->u.string);
+        }
     } else {
-	salt[0] = choise[random_number((int)strlen(choise), 0)];
-	salt[1] = choise[random_number((int)strlen(choise), 0)];
+        salt = build_salt(2);
     }
-#if defined(sun) || defined(SOLARIS)
-    res = make_mstring((char *)_crypt((sp-1)->u.string, salt));
-#else
+    
     res = make_mstring((char *)crypt((sp-1)->u.string, salt));
-#endif
+    free(salt);
+    
     pop_n_elems(2);
     push_mstring(res);
 }
@@ -4851,17 +4817,17 @@ f_destruct(int num_arg)
 static void
 f_random(int num_arg)
 {
-    int seed;
+    long long seed;
     struct svalue *arg = sp - num_arg + 1;
 
     if (num_arg > 1)
     {
 	seed = arg[1].u.number;
 	pop_stack();
-	sp->u.number = random_number(arg[0].u.number, seed);
+	sp->u.number = random_number(arg[0].u.number, sizeof(seed), (char *)&seed);
     }
     else
-	sp->u.number = random_number(arg[0].u.number, 0);
+	sp->u.number = random_number(arg[0].u.number, 0, NULL);
 }
 
 /* ARGSUSED */
@@ -4885,6 +4851,51 @@ f_for(int num_arg)
     fatal("F_FOR should not appear.\n");
 }
 
+/* ARGSUSED */
+static void
+f_foreach_m(int num_arg)
+{
+    struct svalue *key_var = sp - 4, *val_var = sp - 3;
+    struct svalue *map = sp - 2, *array = sp - 1, *ix = sp;
+
+    if (map->type == T_NUMBER) {
+        pc = current_prog->program + read_short(pc);
+        return;
+    }
+    if (map->type != T_MAPPING)
+        bad_arg(3, F_FOREACH_M, map);
+    if (ix->u.number >= array->u.vec->size) {
+        pc = current_prog->program + read_short(pc);
+        return;
+    }
+    pc += 2;
+    assign_svalue(key_var->u.lvalue, array->u.vec->item + ix->u.number);
+    assign_svalue(val_var->u.lvalue, get_map_lvalue(map->u.map, key_var->u.lvalue, 0));
+    ix->u.number++;
+}
+
+/* ARGSUSED */
+static void
+f_foreach(int num_arg)
+{
+    struct svalue *loopvar = sp - 2, *array = sp - 1, *ix = sp;
+
+    if (array->type == T_NUMBER) {
+        pc = current_prog->program + read_short(pc);
+        return;
+    }
+    if (array->type != T_POINTER)
+        bad_arg(2, F_FOREACH, array);
+    if (ix->u.number >= array->u.vec->size) {
+        pc = current_prog->program + read_short(pc);
+        return;
+    }
+    pc += 2;
+    assign_svalue(loopvar->u.lvalue, array->u.vec->item + ix->u.number);
+    ix->u.number++;
+ 
+}
+
 /******** function stuff *********/
 #define ISEMPTY(ob) (ob.type == T_FUNCTION && ob.u.func->funtype == FUN_EMPTY)
 
@@ -4898,7 +4909,7 @@ papply(int num_arg)	/* num_arg does not include the function */
     int newsize;
 
     if ((sp-num_arg)->type != T_FUNCTION)
-	error("Bad function argument to partial application '&'.\n");
+      bad_arg(1, F_PAPPLY, sp - num_arg);
 
     oldf = (sp-num_arg)->u.func;
 #ifdef FUNCDEBUG
@@ -4970,7 +4981,7 @@ f_papplyv(int xxx)
 
     if (arg[0].type != T_FUNCTION)
 	fatal("Non-function in f_papply_array\n");
-    if (arg[1].type != T_ARRAY)
+    if (arg[1].type != T_POINTER)
 	fatal("Non-array in f_papply_array\n");
     v = arg[1].u.vec;
     INCREF(v->ref);		/* we pop it below */
@@ -4981,6 +4992,54 @@ f_papplyv(int xxx)
     free_vector(v);		/* and free it now */
     papply(size);
 }
+
+/* ARGSUSED */
+void
+strip_ansi( char *from, char *to, int targ_len )
+{
+  int len;
+  int count = 0;
+  while ( *from && count < targ_len) {
+      if( *from == '^' ) {
+        switch( *(from + 1 ) ) {
+          case '=' :
+            for( len=4;len>0;len--) if( *from ) from++;
+            break;
+          case '+' : case '-':
+            for( len=3;len>0;len--) if( *from ) from++;
+            break;
+          case '*' : case 'n' : case 'N':
+            for( len=2;len>0;len--) if( *from ) from++;
+            break;
+          default:
+            if( *(++from) ) {
+              *to++ = *from++;
+              count++;
+            }
+            break;
+        }
+      } else {
+        *to++ = *from++;
+        count++;
+      }
+  }
+  *to = '\0';
+}
+
+static void
+f_strip_ansi(int num_arg)
+{
+    char *str,*to,*from;
+    int  len = 0;
+
+    to = from = str = make_mstring(sp->u.string);
+
+    strip_ansi( from, to, strlen( to ) );
+
+    pop_stack();
+    push_mstring( str );
+}
+
 
 char *
 getclosurename(struct closure *f)
@@ -4996,11 +5055,6 @@ getclosurename(struct closure *f)
 
 	if (ob->flags & O_DESTRUCTED)
 	    return "<<DESTRUCTED>>";
-#ifdef USE_SWAP
-	access_object(ob);	/* needed? */
-	access_program(ob->prog);
-	access_program(ob->prog->inherit[f->funinh].prog);
-#endif
 	return ob->prog->inherit[f->funinh].prog->functions[f->funno].name;
     }
 }
@@ -5184,15 +5238,8 @@ call_var(int num_arg, struct closure *f)
     }
     if (ob) {
 	/* speed up call by only doing access_* when really needed */
-#ifdef USE_SWAP
-	access_object(ob);
-#endif
 	if (f->funno == 65535)
 	    fatal("bad function index\n");
-#ifdef USE_SWAP
-	access_program(ob->prog);
-	access_program(ob->prog->inherit[f->funinh].prog);
-#endif
 	call_function(ob, f->funinh, (unsigned int)f->funno, num_arg);
     } else {
 	/*(void)fprintf(stderr, "call efun %d %d\n", efun, num_arg);*/
@@ -5219,9 +5266,9 @@ f_call_var(int xxx)
 	error("Bad function argument in function call.\n");
     f = sp->u.func;
     sp--;			/* pop function argument, but don't free it */
-/*(void)printf("call_var in  %d %s\n", num_arg, show_closure(f));*/
+    /*(void)printf("call_var in  %d %s\n", num_arg, show_closure(f));*/
     r = call_var(num_arg, f);
-/*(void)printf("call_var out %d %s\n", num_arg, show_closure(f));*/
+    /*(void)printf("call_var out %d %s\n", num_arg, show_closure(f));*/
     free_closure(f);		/* hmm, what if we abort?  f leaks. */
     if (!r)
 	error("Call of function failed\n");
@@ -5306,6 +5353,9 @@ alloc_objclosure(int ftype, int inh, int no, struct object *ob, char *refstr, in
     struct closure *fun;
     static int next = 0;
 
+    if (ftype == FUN_EMPTY)
+        fatal("Empty closure allocated");
+    
     if (usecache) {
 	/* Avoid repeated closure construction in some cases.
 	 * Occurs a lot in add_action.
@@ -5325,7 +5375,7 @@ alloc_objclosure(int ftype, int inh, int no, struct object *ob, char *refstr, in
     }
 
     fun = alloc_closure(ftype);
-/*(void)printf("alloc_objclosure=%lx %lx %s\n", fun, ob, refstr);*/
+    /*(void)printf("alloc_objclosure=%lx %lx %s\n", fun, ob, refstr);*/
     fun->funobj = ob;
     if (ob)
 	add_ref(fun->funobj, refstr);
@@ -5334,7 +5384,10 @@ alloc_objclosure(int ftype, int inh, int no, struct object *ob, char *refstr, in
 
     /* Add function to cache */
     if (funccache[next])
-	free_closure(funccache[next]); /* free old cache location now */
+    {
+    	free_closure(funccache[next]);
+    }
+    
     funccache[next] = fun;
     INCREF(fun->ref);		/* can be referenced from the cache now */
     next = (next+1) % FUNCCACHE;
@@ -5348,9 +5401,6 @@ alloc_objclosurestr(int ftype, char *funstr, struct object *ob, char *refstr, in
     int funinh, funno;
 
     /* look up function name in object */
-#ifdef USE_SWAP
-    access_object(ob); /* needed? */
-#endif
     if (!(ob->flags & O_DESTRUCTED) &&
 	search_for_function(funstr, ob->prog)) {
 	/* maybe overly restrictive, but don't allow everything... */
@@ -5404,7 +5454,7 @@ f_build_closure(int num_arg)
     struct closure *f;
     int ftype;
     struct object *obj;
-    unsigned short funno;
+    unsigned short funno, fun_inh;
     
     ftype = EXTRACT_UCHAR(pc);
     pc++;
@@ -5416,11 +5466,17 @@ f_build_closure(int num_arg)
     }
 
     switch(ftype) {
-    case FUN_LFUN:
+      case FUN_LFUN_NOMASK:
+        fun_inh = EXTRACT_UCHAR(pc);
 	pc++;
 	((char *)&funno)[0] = pc[0];
 	((char *)&funno)[1] = pc[1];
 	pc += 2;
+	f = alloc_objclosure(FUN_LFUN, inh_offset  + (fun_inh - (current_prog->num_inherited - 1)), funno, current_object, "f_build_closure", 1);
+	pop_stack();
+        break;
+      case FUN_LFUN:
+	pc += 3;
 
 	f = alloc_objclosurestr(ftype, sp->u.string, current_object, "f_build_closure", 1);
 	pop_stack();
@@ -5489,7 +5545,8 @@ void
 free_closure(struct closure *f)
 {
     if (f->funtype == FUN_EMPTY)
-	return;
+        return;
+    
     if (!f->ref || --f->ref > 0)
 	return;
 /*(void)printf("free_closure %lx %s\n", f, show_closure(f));*/
@@ -5503,6 +5560,8 @@ free_closure(struct closure *f)
 	*p = (*p)->next;
     }
 #endif
+
+    
     free_vector(f->funargs);
     if (f->funobj)
 	free_object(f->funobj, "free_closure");
@@ -5530,35 +5589,28 @@ dumpfuncs()
 #endif
 
 /*********************************/
-
-static unsigned short read_short(char *addr)
+static int read_long_long(char *addr)
 {
-    unsigned short ret;
+    long long ret;
 
-    ((char *)&ret)[0] = ((char *)addr)[0];
-    ((char *)&ret)[1] = ((char *)addr)[1];
-
-    return ret;
-}
-static int read_int(char *addr)
-{
-    int ret;
-
-    ((char *)&ret)[0] = ((char *)addr)[0];
-    ((char *)&ret)[1] = ((char *)addr)[1];
-    ((char *)&ret)[2] = ((char *)addr)[2];
-    ((char *)&ret)[3] = ((char *)addr)[3];
+    memcpy(&ret, addr, sizeof(ret));
 
     return ret;
 }
 
-static int
-cmp_values(long val, long cmp, int how)
+typedef union {
+    long long i;
+    char *str;
+} searchval_t;
+	
+static long long
+cmp_values(searchval_t val, long long cmp, int as_str)
 {
-    if (how)
-	return strcmp((char *)val, current_prog->rodata + (int)cmp);
+    if (as_str) {
+	return strcmp(val.str, current_prog->rodata + cmp);
+    }
     else
-	return (int)(val - cmp);
+	return (long long)(val.i - cmp);
 }
 
 struct case_entry
@@ -5578,14 +5630,14 @@ f_switch(int num_arg)
 #define STR_TABLE 1
 
 #define E_VALUE  0
-#define E_OFFSET 4
-#define ENTRY_SIZE 6
+#define E_OFFSET 8
+#define ENTRY_SIZE 10
 
 #define RANGE_OFFSET ((unsigned short)-1)
 
     int tab_head, tab_tail, tab_mid;
     unsigned int tab_start, tab_end;
-    long search_val = 0;
+    searchval_t search_val;
     short tab_type, is_str;
 
     tab_type = (*pc) & 0xff;
@@ -5596,6 +5648,7 @@ f_switch(int num_arg)
 
     tab_head = 0;
     tab_tail = (tab_end - tab_start) / ENTRY_SIZE - 1;
+    
     if (is_str)
     {
 	/* This table has 0 as case label as first entry in the table */
@@ -5608,11 +5661,11 @@ f_switch(int num_arg)
 	}
 	if (sp->type != T_STRING)
 	    bad_arg(1, F_SWITCH, sp);
-	search_val = (long) sp->u.string;
+	search_val.str = sp->u.string;
 	tab_head++;
     }
     else if (sp->type == T_NUMBER)
-	search_val = sp->u.number;
+	search_val.i = sp->u.number;
     else
 	bad_arg(1, F_SWITCH, sp);
 
@@ -5628,11 +5681,11 @@ f_switch(int num_arg)
 	     (tab_mid--, 1)))
 	{
 	    /* It is a range entry */
-	    long lo_value, hi_value;
+	    long long lo_value, hi_value;
 
-	    lo_value = read_int(current_prog->program + tab_start +
+	    lo_value = read_long_long(current_prog->program + tab_start +
 				tab_mid * ENTRY_SIZE + E_VALUE);
-	    hi_value = read_int(current_prog->program + tab_start +
+	    hi_value = read_long_long(current_prog->program + tab_start +
 				tab_mid * ENTRY_SIZE + E_VALUE + ENTRY_SIZE);
 	    if (cmp_values(search_val, lo_value, is_str) < 0)
 		tab_tail = tab_mid - 1;
@@ -5653,7 +5706,7 @@ f_switch(int num_arg)
 	    long value;
 	    int cmp;
 
-	    value = read_int(current_prog->program + tab_start +
+	    value = read_long_long(current_prog->program + tab_start +
 			     tab_mid * ENTRY_SIZE + E_VALUE);
 	    if ((cmp = cmp_values(search_val, value, is_str)) == 0)
 	    {
@@ -5709,16 +5762,16 @@ f_mkmapping(int num_arg)
 {
     struct mapping *mm = 0;
 
-    if ((sp-1)->type == T_ARRAY && sp->type == T_ARRAY)
+    if ((sp-1)->type == T_POINTER && sp->type == T_POINTER)
 	mm = make_mapping((sp-1)->u.vec, sp->u.vec);
-    else if ((sp-1)->type == T_NUMBER && sp->type == T_ARRAY)
+    else if ((sp-1)->type == T_NUMBER && sp->type == T_POINTER)
 	mm = make_mapping(NULL, sp->u.vec);
-    else if ((sp-1)->type == T_ARRAY && sp->type == T_NUMBER)
+    else if ((sp-1)->type == T_POINTER && sp->type == T_NUMBER)
 	mm = make_mapping((sp-1)->u.vec, NULL);
     else if ((sp-1)->type == T_NUMBER && sp->type == T_NUMBER)
     {
-	error("One argument must be a pointer.\n");
-	return;
+      bad_arg_op(F_MKMAPPING, sp - 1, sp);
+      return;
     }
     pop_n_elems(2);
     push_mapping(mm, FALSE);
@@ -5740,7 +5793,7 @@ f_m_sizeof(int num_arg)
 
 /* ARGSUSED */
 static void
-f_m_indices(int num_arg)
+f_m_indexes(int num_arg)
 {
     struct vector *v;
 
@@ -5755,13 +5808,6 @@ f_m_indices(int num_arg)
 	pop_stack();
 	push_number(0);
     }
-}
-
-/* ARGSUSED */
-static void
-f_m_indexes(int num_arg)
-{
-    f_m_indices( num_arg );
 }
 
 /* ARGSUSED */
@@ -5818,6 +5864,22 @@ f_sizeof(int num_arg)
 
 /* ARGSUSED */
 static void
+f_upper_case(int num_arg)
+{
+    char *str;
+    int  i;
+
+    if (sp->type == T_NUMBER)
+	return;
+    str = make_mstring(sp->u.string);
+    for (i = strlen(str)-1; i>=0; i--)
+	str[i] = toupper(str[i]);
+    pop_stack();
+    push_mstring(str);
+}
+
+/* ARGSUSED */
+static void
 f_lower_case(int num_arg)
 {
     char *str;
@@ -5827,8 +5889,7 @@ f_lower_case(int num_arg)
 	return;
     str = make_mstring(sp->u.string);
     for (i = strlen(str)-1; i>=0; i--)
-	if (isalpha(str[i]))
-	    str[i] |= 'a' - 'A';
+	str[i] = tolower(str[i]);
     pop_stack();
     push_mstring(str);
 }
@@ -5858,13 +5919,15 @@ f_readable_string(int num_arg)
 static void
 f_capitalize(int num_arg)
 {
-    if (sp->type == T_NUMBER)
-	return;
-    if (islower(sp->u.string[0])) {
-	char *str;
+    struct svalue *arg = sp - num_arg + 1;
 
-	str = make_mstring(sp->u.string);
-	str[0] += 'A' - 'a';
+    if (arg[0].type == T_NUMBER)
+	return;
+
+    if (islower(arg[0].u.string[0])) {
+	char *str;
+	str = make_mstring(arg[0].u.string);
+	str[0] = toupper(str[0]);
 	pop_stack();
 	push_mstring(str);
     }
@@ -5877,13 +5940,12 @@ f_process_string(int num_arg)
     extern char *process_string (char *, int);
     char *str;
 
-    str = process_string(sp[-1].u.string, sp->u.number);
+    str = process_string(sp[-1].u.string, sp->u.number != 0);
     pop_stack();
-    if (str != sp->u.string)
+    if (str)
     {
 	pop_stack();
-	push_mstring(make_mstring(str));
-	free(str);
+	push_mstring(str);
     }
 }
 
@@ -5894,7 +5956,7 @@ f_process_value(int num_arg)
     extern struct svalue *process_value (char *, int);
     struct svalue *ret;
 
-    ret = process_value(sp[-1].u.string, sp->u.number);
+    ret = process_value(sp[-1].u.string, sp->u.number != 0);
     pop_stack();
     pop_stack();
     if (ret)
@@ -5920,12 +5982,12 @@ f_command(int num_arg)
 static void
 f_get_dir(int num_arg)
 {
-    struct vector *v = get_dir((sp - 1)->u.string, sp[0].u.number);
+    struct vector *v = get_dir(sp->u.string);
 
-    pop_n_elems(num_arg);
-    if (v)
+    pop_stack();
+    if (v) {
 	push_vector(v, FALSE);
-    else
+    } else
 	push_number(0);
 }
 
@@ -6006,7 +6068,7 @@ f_input_to(int num_arg)
 
 	WARNOBSOLETE(current_object, "string as function in input_to");
     } else
-	error("Bad arg to input_to()\n");
+      bad_arg(1, F_INPUT_TO, arg);
 
     if (num_arg == 1 || (arg[1].type == T_NUMBER && arg[1].u.number == 0))
 	flag = 0;
@@ -6022,6 +6084,28 @@ f_set_living_name(int num_arg)
     set_living_name(current_object, sp->u.string);
 }
 
+/* ARGSUSED */
+static void
+f_query_living_name(int num_arg)
+{
+    char *str;
+
+    if (sp->type == T_NUMBER)
+    {
+       assign_svalue(sp, &const0);
+       return;
+    }
+
+    str = sp->u.ob->living_name;
+    pop_stack();
+
+    if (str)
+       push_string(str, STRING_SSTRING);
+    else
+       push_number(0);
+}
+
+
 static void
 f_parse_command(int num_arg)
 {
@@ -6033,11 +6117,11 @@ f_parse_command(int num_arg)
     arg = sp - num_arg + 1;
     if (arg[0].type != T_STRING)
 	bad_arg(1, F_PARSE_COMMAND, &arg[0]);
-    if (arg[1].type != T_OBJECT && arg[1].type != T_ARRAY)
+    if (arg[1].type != T_OBJECT && arg[1].type != T_POINTER)
 	bad_arg(2, F_PARSE_COMMAND, &arg[1]);
     if (arg[2].type != T_STRING)
 	bad_arg(3, F_PARSE_COMMAND, &arg[2]);
-    if (arg[1].type == T_ARRAY)
+    if (arg[1].type == T_POINTER)
 	check_for_destr(&arg[1]);
 
     i = parse(arg[0].u.string, &arg[1], arg[2].u.string, &arg[3],
@@ -6115,7 +6199,7 @@ f_present(int num_arg)
 
     if ((sp-1)->type == T_NUMBER) {
 	if ((sp-1)->u.number != 0)
-	    error("Bad argument 1 to present()\n");
+	  bad_arg(1, F_PRESENT, sp - 1);
 	ob = 0;
     } else
 	ob = object_present((sp-1), sp);
@@ -6142,13 +6226,10 @@ f_const1(int num_arg)
 static void
 f_number(int num_arg)
 {
-    int i;
+    long long i;
 
-    ((char *)&i)[0] = pc[0];
-    ((char *)&i)[1] = pc[1];
-    ((char *)&i)[2] = pc[2];
-    ((char *)&i)[3] = pc[3];
-    pc += 4;
+    memcpy(&i, pc, sizeof(i));
+    pc += sizeof(i);
     push_number(i);
 }
 
@@ -6186,11 +6267,11 @@ f_add_eq(int num_arg)
 {
     struct svalue *argp;
     char *new_str;
-    int  i;
+    long long  i;
     double fl;
 
     if (sp[-1].type != T_LVALUE)
-	bad_arg(1, F_ADD_EQ, sp-1);
+      error("Non-lvalue argument to +=");
     argp = sp[-1].u.lvalue;
     switch(argp->type) 
     {
@@ -6207,7 +6288,7 @@ f_add_eq(int num_arg)
 	    else if (sp->type == T_NUMBER) 
 	    {
 		char buff[20];
-		(void)sprintf(buff, "%d", sp->u.number);
+		(void)sprintf(buff, "%lld", sp->u.number);
 		new_str = allocate_mstring(strlen(argp->u.string) + strlen(buff));
 		(void)strcpy(new_str, argp->u.string);
 		(void)strcat(new_str, buff);
@@ -6216,7 +6297,7 @@ f_add_eq(int num_arg)
 	    } 
 	    else 
 	    {
-		bad_arg(2, F_ADD_EQ, sp);
+		bad_arg_op(F_ADD_EQ, argp, sp);
 	    }
 	    break;
 	case T_NUMBER:
@@ -6228,24 +6309,24 @@ f_add_eq(int num_arg)
 	    } 
 	    else 
 	    {
-		error("Bad type number to rhs +=.\n");
+		bad_arg_op(F_ADD_EQ, argp, sp);
 	    }
 	    break;
 	case T_FLOAT:
 	    if (sp->type == T_FLOAT) 
 	    {
-		fl = (double)argp->u.real + (double)sp->u.real;
+		fl = argp->u.real + sp->u.real;
 		pop_n_elems(2);
 		push_float(fl);
 	    } 
 	    else 
 	    {
-		error("Bad type number to rhs +=.\n");
+		bad_arg_op(F_ADD_EQ, argp, sp);
 	    }
 	    break;
 	case T_MAPPING:
 	    if (sp->type != T_MAPPING) {
-		error("Bad type to rhs +=.\n");
+		bad_arg_op(F_ADD_EQ, argp, sp);
 	    }
 	    else {
 		struct mapping *m;
@@ -6259,22 +6340,22 @@ f_add_eq(int num_arg)
 		push_mapping(m, FALSE);
 	    }
 	    break;
-	case T_ARRAY:
-	    if (sp->type != T_ARRAY) {
-		error("Bad type to rhs +=.\n");
+	case T_POINTER:
+	    if (sp->type != T_POINTER) {
+		bad_arg_op(F_ADD_EQ, argp, sp);
 	    }
 	    else {
 		struct vector *v;
 
 		check_for_destr(argp);
 		check_for_destr(sp);
-		v = add_array(argp->u.vec,sp->u.vec);
+		v = add_array(argp->u.vec, sp->u.vec);
 		pop_n_elems(2);
 		push_vector(v, FALSE);
 	    }
 	    break;	      
 	default:
-	    error("Bad type to lhs += \n");
+	  bad_arg_op(F_ADD_EQ, argp, sp);
     }
     assign_svalue(argp, sp);
 }
@@ -6286,27 +6367,27 @@ f_sub_eq(int num_arg)
     struct svalue *argp;
 
     if (sp[-1].type != T_LVALUE)
-	bad_arg(1, F_SUB_EQ, sp-1);
+      error("Non-lvalue argument to -=");
     argp = sp[-1].u.lvalue;
     switch (argp->type) {
 	case T_NUMBER:
 	    if (sp->type != T_NUMBER)
-		error("Bad right type to -=\n");
+		bad_arg_op(F_SUB_EQ, argp, sp);
 	    argp->u.number -= sp->u.number;
 	    sp--;
 	    break;
 	case T_FLOAT:
 	    if (sp->type != T_FLOAT)
-		error("Bad right type to -=\n");
+	      bad_arg_op(F_SUB_EQ, argp, sp);
 	    FLOATASGOP(argp->u.real, -= , sp->u.real);
 	    sp--;
 	    break;
-	case T_ARRAY:
+	case T_POINTER:
 	    {
 		struct vector *v;
 		
-		if (sp->type != T_ARRAY)
-		    error("Bad right type to -=\n");
+		if (sp->type != T_POINTER)
+		  bad_arg_op(F_SUB_EQ, argp, sp);
 
 		check_for_destr(argp);
 		check_for_destr(sp);
@@ -6329,7 +6410,7 @@ f_sub_eq(int num_arg)
 		break;
 	    }
 	default:
-	    error("Bad left type to -=.\n");
+	  bad_arg_op(F_SUB_EQ, argp, sp);
     }
     assign_svalue(sp, argp);
 }
@@ -6340,27 +6421,63 @@ f_mult_eq(int num_arg)
 {
     struct svalue *argp;
     double fl;
-    int i;
+    long long i;
 
     if (sp[-1].type != T_LVALUE)
-	bad_arg(1, F_MULT_EQ, sp-1);
+      error("Non-lvalue argument to *=");
     argp = sp[-1].u.lvalue;
     if (argp->type == T_FLOAT && sp->type == T_FLOAT)
     {
-	fl = (double)argp->u.real * (double)sp->u.real;
+	fl = argp->u.real * sp->u.real;
 	pop_n_elems(2);
 	push_float(fl);
 	assign_svalue(argp, sp);
         return;
     }
-    if (argp->type != T_NUMBER)
-	error("Bad left type to *=.\n");
-    if (sp->type != T_NUMBER)
-	error("Bad right type to *=\n");
-    i = argp->u.number * sp->u.number;
-    pop_n_elems(2);
-    push_number(i);
-    assign_svalue(argp, sp);
+    if (argp->type == T_NUMBER) {
+	if (sp->type == T_NUMBER) {
+	    i = argp->u.number * sp->u.number;
+	    pop_n_elems(2);
+	    push_number(i);
+	    assign_svalue(argp, sp);
+	    return;
+	}
+        else if (sp->type == T_STRING) {
+            char *result = multiply_string(sp->u.string, argp->u.number);
+	    pop_stack();
+	    pop_stack();
+	    push_string(result, STRING_MSTRING);
+	    assign_svalue(argp, sp);
+	    return;
+        }
+        else if (sp->type == T_POINTER) {
+	    struct vector *result = multiply_array(sp->u.vec,
+						   argp->u.number);
+	    pop_stack();
+	    pop_stack();
+	    push_vector(result, 0);
+	    assign_svalue(argp, sp);
+            return;
+        }
+    } else if (argp->type == T_POINTER &&
+	       sp->type == T_NUMBER) {
+	    struct vector *result = multiply_array(argp->u.vec,
+						   sp->u.number);
+	    pop_stack();
+	    pop_stack();
+	    push_vector(result, 0);
+	    assign_svalue(argp, sp);
+            return;
+   } else if (argp->type == T_STRING &&
+	       sp->type == T_NUMBER) {
+	char *result = multiply_string(argp->u.string, sp->u.number);
+	pop_stack();
+	pop_stack();
+	push_string(result, STRING_MSTRING);
+	assign_svalue(argp, sp);
+	return;
+    }
+    bad_arg_op(F_MULT_EQ, argp, sp);
 }
 
 /* ARGSUSED */
@@ -6368,27 +6485,27 @@ static void
 f_and_eq(int num_arg)
 {
     struct svalue *argp;
-    int i;
+    long long i;
 
     if (sp[-1].type != T_LVALUE)
-	bad_arg(1, F_AND_EQ, sp-1);
+      error("Non-lvalue argument to &=");
     argp = sp[-1].u.lvalue;
     switch (argp->type)
     {
 	case T_NUMBER:
 	    if (sp->type != T_NUMBER)
-		error("Bad right type to &=\n");
+	      bad_arg_op(F_AND_EQ, argp, sp);
 	    i = argp->u.number & sp->u.number;
 	    pop_n_elems(2);
 	    push_number(i);
 	    assign_svalue(argp, sp);
 	    break;
-	case T_ARRAY:
+	case T_POINTER:
 	    {
 		struct vector *v;
 		
-		if (sp->type != T_ARRAY)
-		    error("Bad right type to &=\n");
+		if (sp->type != T_POINTER)
+		  bad_arg_op(F_AND_EQ, argp, sp);
 		
 		v = intersect_array(argp->u.vec,  sp->u.vec);
 		
@@ -6408,7 +6525,7 @@ f_and_eq(int num_arg)
 		break;
 	    }
 	default:
-	    error("Bad left type to &=.\n");
+	  bad_arg_op(F_AND_EQ, argp, sp);
     }
 }
 
@@ -6417,12 +6534,12 @@ static void
 f_or_eq(int num_arg)
 {
     struct svalue *argp;
-    int i;
+    long long i;
 
     if (sp[-1].type != T_LVALUE)
-	bad_arg(1, F_OR_EQ, sp-1);
+      error("Non-lvalue argument to |=");
     argp = sp[-1].u.lvalue;
-    if (sp->type == T_ARRAY && argp->type == T_ARRAY)
+    if (sp->type == T_POINTER && argp->type == T_POINTER)
     {
 	struct vector *v;
 
@@ -6438,10 +6555,9 @@ f_or_eq(int num_arg)
 	assign_svalue(argp,sp);
 	return;
     }
-    if (argp->type != T_NUMBER)
-	error("Bad left type to |=.\n");
-    if (sp->type != T_NUMBER)
-	error("Bad right type to |=\n");
+    if (argp->type != T_NUMBER ||
+	sp->type != T_NUMBER)
+      bad_arg_op(F_OR_EQ, argp, sp);
     i = argp->u.number | sp->u.number;
     pop_n_elems(2);
     push_number(i);
@@ -6453,15 +6569,14 @@ static void
 f_xor_eq(int num_arg)
 {
     struct svalue *argp;
-    int i;
+    long long i;
 
     if (sp[-1].type != T_LVALUE)
-	bad_arg(1, F_XOR_EQ, sp-1);
+      error("Non-lvalue argument to ^=");
     argp = sp[-1].u.lvalue;
-    if (argp->type != T_NUMBER)
-	error("Bad left type to ^=.\n");
-    if (sp->type != T_NUMBER)
-	error("Bad right type to ^=\n");
+    if (argp->type != T_NUMBER ||
+	sp->type != T_NUMBER)
+      bad_arg_op(F_XOR_EQ, argp, sp);
     i = argp->u.number ^ sp->u.number;
     pop_n_elems(2);
     push_number(i);
@@ -6473,15 +6588,14 @@ static void
 f_lsh_eq(int num_arg)
 {
     struct svalue *argp;
-    int i;
+    long long i;
 
     if (sp[-1].type != T_LVALUE)
-	bad_arg(1, F_LSH_EQ, sp-1);
+      error("Non-lvalue argument to <<=");
     argp = sp[-1].u.lvalue;
-    if (argp->type != T_NUMBER)
-	error("Bad left type to <<=.\n");
-    if (sp->type != T_NUMBER)
-	error("Bad right type to <<=\n");
+    if (argp->type != T_NUMBER ||
+	sp->type != T_NUMBER)
+      bad_arg_op(F_LSH_EQ, argp, sp);
     i = argp->u.number << sp->u.number;
     pop_n_elems(2);
     push_number(i);
@@ -6493,15 +6607,14 @@ static void
 f_rsh_eq(int num_arg)
 {
     struct svalue *argp;
-    int i;
+    long long i;
 
     if (sp[-1].type != T_LVALUE)
-	bad_arg(1, F_RSH_EQ, sp-1);
+      error("Non-lvalue argument to >>=");
     argp = sp[-1].u.lvalue;
-    if (argp->type != T_NUMBER)
-	error("Bad left type to >>=.\n");
-    if (sp->type != T_NUMBER)
-	error("Bad right type to >>=\n");
+    if (argp->type != T_NUMBER ||
+	sp->type != T_NUMBER)
+      bad_arg_op(F_RSH_EQ, argp, sp);
     i = (int)((unsigned)argp->u.number >> sp->u.number);
     pop_n_elems(2);
     push_number(i);
@@ -6522,26 +6635,25 @@ static void
 f_div_eq(int num_arg)
 {
     struct svalue *argp;
-    int i;
+    long long i;
     double fl;
 
     if (sp[-1].type != T_LVALUE)
-	bad_arg(1, F_DIV_EQ, sp-1);
+      error("Non-lvalue argument to /=");
     argp = sp[-1].u.lvalue;
     if (argp->type == T_FLOAT && sp->type == T_FLOAT)
     {
 	if (sp->u.real == 0.0)
 	    error("Division by 0\n");
-        fl = (double)argp->u.real / (double)sp->u.real;
+        fl = argp->u.real / sp->u.real;
 	pop_n_elems(2);
 	push_float(fl);
 	assign_svalue(argp, sp);
         return;
     }
-    if (argp->type != T_NUMBER)
-	error("Bad left type to /=.\n");
-    if (sp->type != T_NUMBER)
-	error("Bad right type to /=\n");
+    if (argp->type != T_NUMBER ||
+	sp->type != T_NUMBER)
+        bad_arg_op(F_DIV_EQ, argp, sp);
     if (sp->u.number == 0)
 	error("Division by 0\n");
     i = argp->u.number / sp->u.number;
@@ -6555,21 +6667,30 @@ static void
 f_mod_eq(int num_arg)
 {
     struct svalue *argp;
-    int i;
 
     if (sp[-1].type != T_LVALUE)
-	bad_arg(1, F_MOD_EQ, sp-1);
+      error("Non-lvalue argument to %%=");
     argp = sp[-1].u.lvalue;
-    if (argp->type != T_NUMBER)
-	error("Bad left type to %=.\n");
-    if (sp->type != T_NUMBER)
-	error("Bad right type to %=\n");
-    if (sp->u.number == 0)
-	error("Division by 0\n");
-    i = argp->u.number % sp->u.number;
-    pop_n_elems(2);
-    push_number(i);
-    assign_svalue(argp, sp);
+    if (argp->type != sp->type ||
+        (sp->type != T_NUMBER && sp->type != T_FLOAT))
+      bad_arg_op(F_MOD_EQ, argp, sp);
+
+    if (sp->type == T_NUMBER) {
+      long long i;
+      if (sp->u.number == 0)
+	error("Modulus by zero.\n");
+      i = argp->u.number = argp->u.number % sp->u.number;
+      pop_n_elems(2);
+      push_number(i);
+    } else if (sp->type == T_FLOAT) {
+      double d;
+      errno = 0;
+      d = argp->u.real = fmod(argp->u.real, sp->u.real);
+      if (errno)
+	error("Modulus by zero.\n");
+      pop_n_elems(2);
+      push_float(d);
+    } 
 }
 
 /* ARGSUSED */
@@ -6603,21 +6724,13 @@ f_unique_array(int num_arg)
 
     if (arg[1].type == T_STRING)
     {
-        struct closure *empty;
-
         /* create a function, &call_other(, "function name") */
-
 	fun = alloc_objclosure(FUN_EFUN, 0, F_CALL_OTHER, 0, "f_unique_array", 0);
         free_vector(fun->funargs);
         fun->funargs = allocate_array(2);
 
-        empty = alloc_objclosure(FUN_EMPTY, 0, 0, 0, "f_unique_array", 0);
-        push_function(empty, FALSE);
-
-        assign_svalue_no_free(&fun->funargs->item[0], sp);
+        assign_svalue_no_free(&fun->funargs->item[0], &constempty);
         assign_svalue_no_free(&fun->funargs->item[1], &arg[1]);
-
-        pop_stack();
     }
     else
     {        
@@ -6636,6 +6749,12 @@ f_unique_array(int num_arg)
 	pop_stack ();
     }
 
+    
+    if (arg[1].type == T_STRING)
+    {
+        free_closure(fun);
+    }
+    
     pop_n_elems(2);
 
     if (res)
@@ -6716,7 +6835,7 @@ f_map(int num_arg)
     } else
 	error("Bad arguments to map\n");
 
-    if (arg[0].type == T_ARRAY) {
+    if (arg[0].type == T_POINTER) {
 	check_for_destr(&arg[0]);
 	res = map_array(arg[0].u.vec, arg[1].u.func);
 	pop_n_elems(num_arg);
@@ -6743,9 +6862,11 @@ f_map(int num_arg)
 static void
 f_sqrt(int num_arg)
 {
-    extern double sqrt(double);
-
-    sp->u.real = chkfloatrange(sqrt((double)sp->u.real));
+    double arg = sp->u.real;
+    errno = 0;
+    sp->u.real = sqrt(arg);
+    if (errno)
+        error("Argument %.18g to sqrt() is out of bounds.\n", arg);
 }
 
 /* ARGSUSED */
@@ -6792,57 +6913,6 @@ f_match_path(int num_arg)
     assign_svalue(sp, svp1);
 }
 
-#ifdef USE_SWAP
-void
-access_object(struct object *ob)
-{
-    extern struct object *obj_list;
-    extern struct object *swap_ob;
-    if (ob->flags & O_SWAPPED)
-	load_ob_from_swap(ob);
-    ob->time_of_ref = current_time;
-
-    if (ob != obj_list && !(ob->flags & O_DESTRUCTED))
-    {
-	ob->prev_all->next_all = ob->next_all;
-	ob->next_all->prev_all = ob->prev_all;
-	if (ob == swap_ob)
-	    swap_ob = ob->prev_all;
-
-	ob->next_all = obj_list;
-	ob->prev_all = obj_list->prev_all;
-
-	obj_list->prev_all->next_all = ob;
-	obj_list->prev_all = ob;
-	obj_list = ob;
-    }
-}
-
-void
-access_program(struct program *prog)
-{
-    extern struct program *prog_list;
-    extern struct program *swap_prog;
-    
-    if (prog->program == (char *)0)
-	load_prog_from_swap(prog);
-    prog->time_of_ref = current_time;
-    if (prog != prog_list)
-    {
-	prog->prev_all->next_all = prog->next_all;
-	prog->next_all->prev_all = prog->prev_all;
-	if (prog == swap_prog)
-	    swap_prog = prog->prev_all;
-
-	prog->next_all = prog_list;
-	prog->prev_all = prog_list->prev_all;
-
-	prog_list->prev_all->next_all = prog;
-	prog_list->prev_all = prog;
-	prog_list = prog;
-    }
-}
-#endif
 
 #define EFUN_TABLE
 #include "efun_table.h"
@@ -6860,36 +6930,6 @@ eval_instruction(char *p)
 #endif
     static int catch_level;
 
-#if defined(RUSAGE) && defined(PROFILE_OBJS)
-    {
-#ifdef SOLARIS
-	struct tms buffer;
-#else
-	struct rusage rus;
-#endif
-	long cpu;
-	
-#ifdef SOLARIS
-	if (times(&buffer) != -1)
-	    cpu = (buffer.tms_utime + buffer.tms_stime);
-#else
-	if (getrusage(RUSAGE_SELF, &rus) >= 0) 
-	{                           
-	    cpu = rus.ru_utime.tv_sec * 1000 + rus.ru_utime.tv_usec / 1000 +
-		rus.ru_stime.tv_sec * 1000 + rus.ru_stime.tv_usec / 1000; 
-	}
-#endif
-	else
-	    cpu = (-1);
-	
-	if (progcpui >= MAX_CPU_STACK) 
-	    fatal("CPU-Stack overflow.\n");
-	
-	progcpu[progcpui].prog = current_prog;
-	progcpu[progcpui++].cpu = cpu;
-    }	
-#endif
-    
     pc = p;
  again:
     i = instruction = EXTRACT_UCHAR(pc);
@@ -6903,10 +6943,14 @@ eval_instruction(char *p)
 
 #ifdef TRACE_CODE
     previous_instruction[last] = instruction + EFUN_FIRST;
-    previous_pc[last] = pc;
+    previous_pc[last] = pc - current_prog->program;
+    reference_prog(current_prog, "trace code");
+    if (previous_prog[last])
+	free_prog(previous_prog[last]);
+    previous_prog[last] = current_prog;
     stack_size[last] = sp - fp - csp->num_local_variables;
     curtracedepth[last] = tracedepth;
-    last = (last + 1) % (sizeof previous_instruction / sizeof (int));
+    last = (last + 1) % TRACE_SIZE;
 #endif
 
     if (i == F_EXT - EFUN_FIRST)
@@ -6968,7 +7012,7 @@ eval_instruction(char *p)
 	 * the number of arguments.
 	 */
 #ifdef DEBUG
-	if (xnum_arg != -1) {
+	if (xnum_arg != -1 && instruction + EFUN_FIRST != F_CALL_SELF) {
 	    expected_stack = sp - num_arg + 1;
 	} else {
 	    expected_stack = 0;
@@ -7007,21 +7051,27 @@ eval_instruction(char *p)
 
     case F_RETURN:
 	{
-	    if (csp->num_local_variables) {
+	    int do_return = csp->extern_call;
+	    
+	    if (sp > fp) {
 		struct svalue *sv;
 
 		sv = sp--;
 		/*
 		 * Deallocate frame and return.
 		 */
-		for (i = 0; i < csp->num_local_variables; i++)
+                while (sp >= fp)
 		    pop_stack();
+		
 		*++sp = *sv;	/* This way, the same ref counts are maintained */
 	    }
 #ifdef DEBUG
-	    if (sp != fp)
+	    if (sp != fp) {
 		fatal("Bad stack at F_RETURN\n"); /* marion */
+	    }
+	    
 #endif
+	    
 	    pop_control_stack();
 	    tracedepth--;
 #ifdef TRACE_CODE
@@ -7035,48 +7085,83 @@ eval_instruction(char *p)
 	    }
 #endif
 
-#if defined(RUSAGE) && defined(PROFILE_OBJS)
-	    {
-#ifdef SOLARIS
-		struct tms buffer;
-#else
-		struct rusage rus;
-#endif
-		long cpu;
-		int n;
-
-#ifdef SOLARIS		
-		if (times(&buffer) != -1)
-		    cpu = (buffer.tms_utime + buffer.tms_stime);
-#else
-		if (getrusage(RUSAGE_SELF, &rus) >= 0) 
-		{                      
-		    cpu = rus.ru_utime.tv_sec * 1000 +
-			rus.ru_utime.tv_usec / 1000 +
-			    rus.ru_stime.tv_sec * 1000 +
-				rus.ru_stime.tv_usec / 1000; 
-		} 
-#endif
-		else cpu = (-1);
-		
-		if (--progcpui<0) 
-		    fatal("CPU-Stack underflow.\n");
-		
-		if (cpu >= 0 && progcpu[progcpui].cpu >=0) 
-		{
-		    cpu = cpu - progcpu[progcpui].cpu;
-		    for(n = progcpui-1; n >= 0; n--) 
-			progcpu[n].cpu += cpu;
-		    if (progcpu[progcpui].prog) 
-			progcpu[progcpui].prog->cpu += cpu;
-		}
-	    }
-#endif
-	    if (csp[1].extern_call)	/* The control stack was popped just before */
+	    if (do_return) {	/* The control stack was popped just before */
 		return;
+	    }
+	    
 	}
+	
 	break;
 
+    case F_TRY:
+        {
+	    struct gdexception exception_frame;
+	    char *new_pc;
+#ifdef DEBUG
+	    struct svalue *stack;
+	    int args, ins;
+#endif
+	    push_pop_error_context (1);
+	    catch_level++;
+
+	    pc += 3;
+	    
+#ifdef DEBUG
+	    stack = expected_stack;
+	    ins = instruction;
+	    args = num_arg;
+#endif
+	    /* signal catch OK - print no err msg */
+	    if (setjmp(exception_frame.e_context))
+	    {
+		/*
+		 * They did a throw() or error. That means that the control
+		 * stack must be restored manually here.
+		 * Restore the value of expected_stack also. It is always 0
+		 * for catch().
+		 */
+		unsigned int varnum;
+#ifdef DEBUG
+		num_arg = args;
+		instruction = ins;
+		expected_stack = 0;
+#endif		      
+		push_pop_error_context (-1);
+		catch_level--;
+		new_pc = current_prog->program + read_short(pc);
+		pc += 2;
+		varnum = EXTRACT_UCHAR(pc);
+		assign_svalue(fp + varnum, &catch_value);
+		pc = new_pc;
+		/* If it was eval_cost too big when cant really catch it */
+		if (eval_cost == 0) {
+		    eval_cost = MAX_COST;
+		    if (catch_level == 0)
+			eval_cost -= EXTRA_COST;
+		}
+	    } else {
+#ifdef DEBUG
+		num_arg = args;
+		instruction = ins;
+		expected_stack = stack;
+#endif
+		exception_frame.e_exception = exception;
+		exception_frame.e_catch = 1;
+		exception = &exception_frame;
+
+		eval_instruction(pc);
+	    }
+	    
+	    /* next error will return 1 by default */
+	    assign_svalue(&catch_value, &const1);
+	    break;
+	case F_END_TRY:
+	    new_pc = pc;
+	    push_pop_error_context(-1);
+	    catch_level--;
+	    pc = new_pc;
+	    return;
+	}
     case F_CATCH:
 	/*
 	 * Catch/Throw - catch errors in system or other peoples routines.
@@ -7167,8 +7252,11 @@ eval_instruction(char *p)
     if ((expected_stack && expected_stack != sp) ||
 	sp < fp + csp->num_local_variables - 1)
     {
-	fatal("Bad stack after evaluation. Instruction %d, num arg %d\n",
-	      instruction, num_arg);
+	fatal("Bad stack after evaluation. Was %d, expected %d, frame ends at %d. Instruction %d, num arg %d\n",
+	      sp - start_of_stack,
+	      expected_stack - start_of_stack,
+	      (fp - start_of_stack) + csp->num_local_variables - 1,
+	    instruction, num_arg);
     }
 #endif /* DEBUG */
     goto again;
@@ -7193,8 +7281,8 @@ s_f_f(char *name, struct program *prog)
 #ifdef GLOBAL_CACHE
     static struct fcache1 fc[GLOBAL_CACHE];
     int global_hash_val;
-    extern int globcache_hits;
-    extern int globcache_tries;
+    extern unsigned long long globcache_hits;
+    extern unsigned long long globcache_tries;
 #endif
     
     if (!name)
@@ -7227,9 +7315,6 @@ s_f_f(char *name, struct program *prog)
 	    int type_mod1 = prog->inherit[function_inherit_found].type;
 	    
 	    function_prog_found = prog->inherit[function_inherit_found].prog;
-#ifdef USE_SWAP
-	    access_program(function_prog_found);
-#endif
 	    function_type_mod_found = function_prog_found->
 		functions[function_index_found].type_flags & TYPE_MOD_MASK ;
 
@@ -7300,9 +7385,6 @@ s_f_f(char *name, struct program *prog)
 	function_inherit_found = i;
     
     function_prog_found = prog->inherit[i].prog;
-#ifdef USE_SWAP
-    access_program(function_prog_found);
-#endif
 #ifdef GLOBAL_CACHE
     fc[global_hash_val].ff_ix =
 #endif
@@ -7366,8 +7448,9 @@ search_for_function(char *name, struct program *prog)
 char debug_apply_fun[30]; /* For debugging */
 #endif
 	    
-int globcache_tries = 0, globcache_hits = 0, funmap_tries = 0;
+unsigned long long globcache_tries = 0, globcache_hits = 0;	    
 
+    
 static int
 apply_low(char *fun, struct object *ob, int num_arg, int external)
 {
@@ -7378,6 +7461,7 @@ apply_low(char *fun, struct object *ob, int num_arg, int external)
      * This object will now be used, and is thus a target for
      * reset later on (when time due).
      */
+	    
 #ifdef DEBUG
     (void)strncpy(debug_apply_fun, fun, sizeof debug_apply_fun);
     debug_apply_fun[sizeof debug_apply_fun - 1] = '\0';
@@ -7418,8 +7502,11 @@ apply_low(char *fun, struct object *ob, int num_arg, int external)
         {
 	    call_function(ob, function_inherit_found,
 			  (unsigned int)function_index_found, num_arg);
+	    
 	    return 1;
+	    
  	}
+	    
     }
     
     /* Not found */
@@ -7447,6 +7534,7 @@ apply_low(char *fun, struct object *ob, int num_arg, int external)
  * Reference counts will be updated for this value, to ensure that no pointers
  * are deallocated.
  */
+	    
 struct svalue *
 sapply(char *fun, struct object *ob, int num_arg, int ext)
 {
@@ -7526,6 +7614,7 @@ function_exists(char *fun, struct object *ob)
  * frame set up. It is expected that there are no arguments. Returned
  * values are removed.
  */
+	    
 void 
 call_function(struct object *ob, int inh_index, unsigned int fun, int num_arg)
 {
@@ -7542,15 +7631,12 @@ call_function(struct object *ob, int inh_index, unsigned int fun, int num_arg)
 	return;
     }
     progp = ob->prog->inherit[inh_index].prog;
-#ifdef USE_SWAP
-    access_program(progp);
-#endif
     funp = &progp->functions[fun];
     
     if (funp->type_flags & NAME_PROTOTYPE) /* Cannot happen. */
 	return;
     
-    push_control_stack(funp);
+    push_control_stack(ob, progp, funp);
     csp->ext_call = 1;
     csp->num_local_variables = num_arg;
     current_prog = progp;
@@ -7571,74 +7657,54 @@ call_function(struct object *ob, int inh_index, unsigned int fun, int num_arg)
  * 
  */
 char *
-inner_get_srccode_position(int code, char *lineno, int lineno_size,
+inner_get_srccode_position(int code, struct lineno *lineno, int lineno_count,
 		     char *inc_files, char *name)
 {
-    int cur_code, cur_line, cur_file, i;
-    unsigned char l;
-    char *st;
     static char buff[200];
+    struct lineno *lo = lineno, *hi = lineno + lineno_count - 1;
+    struct lineno *mid = lo + (hi - lo) / 2;
+    int filenum;
+    char *filename;
 
-    i = 0;
-    cur_code = cur_file = 0;
-    cur_line = 1;
-    code--;
+    if (hi->code <= code) {
+        filenum = hi->file;
 
-    while (cur_code < code && i < lineno_size)
-	switch (l = (unsigned char)lineno[i++]) {
-	    case 0xF1:
-	    case 0xF2:
-	    case 0xF3:
-	    case 0xF4:
-	    case 0xF5:
-	    case 0xF6:
-	    case 0xF7: /* skip forward */
-		cur_line += l & 0x7;
-		break;
-	    case 0xF9:
-	    case 0xFA:
-	    case 0xFB:
-	    case 0xFC:
-	    case 0xFD:
-	    case 0xFE:
-	    case 0xFF: /* skip backwards */
-		cur_line -= l & 0x7;
-		break;
-	    case 0xF8: /* file */
-		cur_file = lineno[i++] & 0xFF;
-		/* FALLTHROUGH */
-	    case 0xF0: /* jump */
-		cur_line = ((lineno[i] & 0xFF) << 8) + (lineno[i + 1] & 0xFF);
-		i += 2;
-		break;
-	    case 0x00:
-		l = 0xF0;
-		/* FALLTHROUGH */
-	    default:
-		cur_code += l;
-		cur_line++;
-		break;
-	}
-
-    cur_line--;
-    if (cur_file == 0)
-	st = name;
-    else {
-	/*
-	 * Find the name of the include file.  All include filenames
-	 * are stored after each others on the form:
-	 *   date:filename<NUL>date:filename<NUL>....
-	 */
-	st = inc_files;
-	while (cur_file > 1) {
-	    st += strlen(st) + 1;
-	    cur_file--;
-	}
-	st = strchr(st, ':');
-	st++;
+        if (filenum == 0)
+            filename = name;
+        else {
+            filename = inc_files;
+            while (filenum > 1) {
+                filename += strlen(filename) + 1;
+                filenum--;
+            }
+            filename = strchr(filename, ':');
+            filename++;
+        }
+        (void)sprintf(buff, "/%s Line: %d", filename, hi->lineno);
+        return buff;
     }
-		
-    (void)sprintf(buff, "/%s Line: %d", st, cur_line);
+    
+    while (hi - lo > 1) {
+        if (mid->code > code)
+            hi = mid;
+        else
+            lo = mid;
+        mid = lo + (hi - lo) / 2;
+    }
+    filenum = lo->file;
+    
+    if (filenum == 0)
+        filename = name;
+    else {
+        filename = inc_files;
+        while (filenum > 1) {
+            filename += strlen(filename) + 1;
+            filenum--;
+        }
+        filename = strchr(filename, ':');
+        filename++;
+    }
+    (void)sprintf(buff, "/%s Line: %d", filename, lo->lineno);
     return buff;
 }
 
@@ -7654,18 +7720,11 @@ get_srccode_position(int offset, struct program *progp)
     if (offset > progp->program_size)
 	fatal("Illegal offset %d in object %s\n", offset, progp->name);
 #endif
-#ifdef USE_SWAP
-    load_lineno_from_swap(progp);
-#endif
 
     ret = inner_get_srccode_position(offset, progp->line_numbers,
 				     progp->sizeof_line_numbers,
 				     progp->include_files,
 				     progp->name);
-#ifdef USE_SWAP
-    if (progp->swap_lineno_index > 0)
-	swap_lineno(progp);
-#endif
 
     return ret;
 }
@@ -7695,9 +7754,6 @@ dump_trace(int how)
 #if defined(DEBUG) && defined(TRACE_CODE)
     if (how)
 	(void) last_instructions();
-#elif defined(lint)
-    if (how)
-	return 0;
 #endif
     for (p = &control_stack[0]; p < csp; p++) 
     {
@@ -7749,7 +7805,7 @@ inter_sscanf(int num_arg)
 {
     char *fmt;		/* Format description */
     char *in_string;	/* The string to be parsed. */
-    int skip_it, number_of_matches;
+    int number_of_matches;
     char *cp;
     struct svalue *arg = sp - num_arg + 1;
 	    
@@ -7779,11 +7835,13 @@ inter_sscanf(int num_arg)
      * Loop for every % or substring in the format. Update num_arg and the
      * arg pointer continuosly. Assigning is done manually, for speed.
      */
-    for (num_arg -= 2, arg += 2, number_of_matches = 0; 
+    num_arg -= 2;
+    arg += 2;
+    for (number_of_matches = 0; num_arg > 0;
 	 /* LINTED: expression has null effect */
-	num_arg > 0; number_of_matches++, num_arg--, arg++)
+	 number_of_matches++, num_arg--, arg++)
     {
-	int i, type;
+	int i, type, base = 0;
 	    
 	if (fmt[0] == '\0')
 	{
@@ -7806,19 +7864,15 @@ inter_sscanf(int num_arg)
 	if (fmt[0] != '%')
 	    fatal("Should be a %% now !\n");
 #endif
-	skip_it = 0;
-	if (fmt[1] == '*')
-	{
-	    skip_it = 1;
-	    fmt++;
-	}
-
-	if (!skip_it && num_arg < 1)
-	    error("Too few variables to sscanf().");
-	
 	type = T_STRING;
-	if (fmt[1] == 'd')
-	    type = T_NUMBER;
+	if (fmt[1] == 'd') {
+	    type = T_NUMBER; base = 10;}
+	else if (fmt[1] == 'x') {
+	    type = T_NUMBER; base = 0x10;}
+	else if (fmt[1] == 'o') {
+	    type = T_NUMBER; base = 010;}
+	else if (fmt[1] == 'i') {
+	    type = T_NUMBER; base = 0;}
 	else if (fmt[1] == 'f')
 	    type = T_FLOAT;
 	else if (fmt[1] != 's')
@@ -7831,28 +7885,19 @@ inter_sscanf(int num_arg)
 	if (type == T_NUMBER)
 	{
 	    char *tmp = in_string;
-	    int tmp_num;
+	    long long tmp_num;
 	    
-	    tmp_num = (int) strtol(in_string, &in_string, 10);
+	    tmp_num = (long long) strtoll(in_string, &in_string, base);
 	    if(tmp == in_string)
 	    {
 		/* No match */
 		break;
 	    }
-
-	    if (skip_it)
-	    {
-		arg--;
-		num_arg++;
-		continue;
-	    }
-
 	    free_svalue(arg->u.lvalue);
 	    arg->u.lvalue->type = T_NUMBER;
 	    arg->u.lvalue->u.number = tmp_num;
 	    while(fmt[0] && fmt[0] == in_string[0])
 		fmt++, in_string++;
-
 	    if (fmt[0] != '%')
 	    {
 		number_of_matches++;
@@ -7862,29 +7907,20 @@ inter_sscanf(int num_arg)
 	}
 	if (type == T_FLOAT)
 	{
-	    extern double strtod(const char *, char **);
 	    char *tmp = in_string;
-	    float tmp_num;
+	    double tmp_num;
 	    
-	    tmp_num = chkfloatrange(strtod(in_string, &in_string));
+	    tmp_num = strtod(in_string, &in_string);
 	    if(tmp == in_string)
 	    {
 		/* No match */
 		break;
 	    }
-	    if (skip_it)
-	    {
-		arg--;
-		num_arg++;
-		continue;
-	    }
-
 	    free_svalue(arg->u.lvalue);
 	    arg->u.lvalue->type = T_FLOAT;
 	    arg->u.lvalue->u.real = tmp_num;
 	    while(fmt[0] && fmt[0] == in_string[0])
 		fmt++, in_string++;
-
 	    if (fmt[0] != '%')
 	    {
 		number_of_matches++;
@@ -7906,14 +7942,8 @@ inter_sscanf(int num_arg)
 	 */
 	if (cp == fmt)
 	{
-	    if (skip_it)
-	    {
-		number_of_matches++;
-		break;
-	    }
-	    
 	    free_svalue(arg->u.lvalue);
-
+	    
 	    arg->u.lvalue->type = T_STRING;
 	    arg->u.lvalue->u.string = make_mstring(in_string);
 	    arg->u.lvalue->string_type = STRING_MSTRING;
@@ -7928,23 +7958,14 @@ inter_sscanf(int num_arg)
 		/*
 	         * Found a match !
 		 */
-		if (!skip_it)
-		{
-		    match = allocate_mstring((size_t)i);
-		    (void) strncpy(match, in_string, (size_t)i);
-		    match[i] = '\0';
-		    free_svalue(arg->u.lvalue);
-		    arg->u.lvalue->type = T_STRING;
-		    arg->u.lvalue->string_type = STRING_MSTRING;
-		    arg->u.lvalue->u.string = match;
-		}
-		else
-		{
-		    arg--;
-		    num_arg++;
-		}
-
+		match = allocate_mstring((size_t)i);
+		(void) strncpy(match, in_string, (size_t)i);
 		in_string += i + cp - fmt;
+		match[i] = '\0';
+		free_svalue(arg->u.lvalue);
+		arg->u.lvalue->type = T_STRING;
+		arg->u.lvalue->string_type = STRING_MSTRING;
+		arg->u.lvalue->u.string = match;
 		fmt = cp;	/* Advance fmt to next % */
 		break;
 	    }
@@ -7978,24 +7999,56 @@ opcdump(void)
  * Reset the virtual stack machine.
  */
 void
-reset_machine(int first)
-{
+init_machine() {
+    sp = start_of_stack - 1;
     csp = control_stack - 1;
-    if (first)
-	sp = start_of_stack - 1;
-    else
-	pop_n_elems(sp - start_of_stack + 1);
+}
+
+void
+reset_machine()
+{
+#if defined(PROFILE_LPC)
+    if (csp != control_stack - 1) {
+	double now = current_cpu();
+	struct program *prog = current_prog;
+	last_execution = now;
+	csp->frame_cpu += (now - csp->startcpu);
+	for (; csp != control_stack - 1; (prog = csp->prog), csp--)
+	{
+	    double tot_delta = now - csp->frame_start;
+	    if (prog)
+		update_prog_profile(prog, now, csp->frame_cpu, tot_delta);
+	    if (csp->funp) {
+		update_func_profile(csp->funp, now, csp->frame_cpu, tot_delta, 1);
+	    }
+	    if (trace_calls) {
+		fprintf(trace_calls_file, "%*s--- %.3f / %.3f\n",
+			(csp - control_stack) * 4, "",
+			csp->frame_cpu * 1000.0,
+			tot_delta * 1000.0);
+	    }
+	}
+	if (trace_calls)
+	    putc('\n', trace_calls_file);
+    }
+#else
+    csp = control_stack - 1;
+#endif
+    pop_n_elems(sp - start_of_stack + 1);
 }
 	    
 #if defined(DEBUG) && defined(TRACE_CODE)
 static char *
-get_arg(int a, int b)
+get_arg(unsigned long a, unsigned long b)
 {
     static char buff[10];
     char *from, *to;
     
-    from = previous_pc[a];
-    to = previous_pc[b];
+    from = previous_prog[a]->program + previous_pc[a];
+    if (EXTRACT_UCHAR(from) + EFUN_FIRST == F_EXT)
+	from++;
+
+    to = previous_prog[b]->program + previous_pc[b];
     if (to - from < 2)
 	return "";
     if (to - from == 2)
@@ -8027,20 +8080,21 @@ get_arg(int a, int b)
 int
 last_instructions()
 {
-    int i;
+    unsigned long i;
     i = last;
     do
     {
-	if (previous_instruction[i] != 0)
-	    (void)printf("%6lx: %3d%*s %8s %-25s (%d)\n",
-		   (unsigned long)previous_pc[i],
+	if (previous_prog[i])
+	    (void)printf("%5lx: %3d%*s %8s %-25s (%d) %s\n",
+			 (unsigned long)previous_pc[i],
 		   previous_instruction[i],
 		   curtracedepth[i],"",
-		   get_arg(i, (i+1) %
-			   (sizeof previous_instruction / sizeof (int))),
+		   get_arg(i, (i+1) % TRACE_SIZE),
 		   get_f_name(previous_instruction[i]),
-		   stack_size[i] + 1);
-	i = (i + 1) % (sizeof previous_instruction / sizeof (int));
+		   stack_size[i] + 1,
+			 get_srccode_position(previous_pc[i], previous_prog[i])
+			 );
+	i = (i + 1) % TRACE_SIZE;
     } while (i != last);
     return last;
 }
@@ -8078,7 +8132,7 @@ count_ref_in_vector(struct svalue *svp, int num)
 	case T_OBJECT:
 	    p->u.ob->extra_ref++;
 	    continue;
-	case T_ARRAY:
+	case T_POINTER:
 	    count_ref_in_vector(&p->u.vec->item[0], p->u.vec->size);
 	    p->u.vec->extra_ref++;
 	    continue;
@@ -8098,7 +8152,7 @@ clear_vector_refs(struct svalue *svp, int num)
     {
 	switch(p->type)
 	{
-	case T_ARRAY:
+	case T_POINTER:
 	    clear_vector_refs(&p->u.vec->item[0], p->u.vec->size);
 	    p->u.vec->extra_ref = 0;
 	    continue;
@@ -8116,9 +8170,6 @@ check_a_lot_ref_counts(struct program *search_prog)
 {
     extern struct object *master_ob;
     struct object *ob;
-#ifdef USE_SWAP
-    extern struct object *swap_ob;
-#endif
     
     /*
      * Pass 1: clear the ref counts.
@@ -8128,19 +8179,12 @@ check_a_lot_ref_counts(struct program *search_prog)
     {
 	ob->extra_ref = 0;
 	ob->prog->extra_ref = 0;
-#ifdef USE_SWAP
-	if (ob->flags & O_SWAPPED)
-	    load_ob_from_swap(ob);
-#endif
 	    
 	clear_vector_refs(ob->variables, ob->prog->num_variables +
 			  ob->prog->inherit[ob->prog->num_inherited - 1]
 			  .variable_index_offset);
 	ob = ob->next_all;
     } while (ob != obj_list);
-#ifdef USE_SWAP
-    swap_ob = obj_list->prev_all;
-#endif
 
     clear_vector_refs(start_of_stack, sp - start_of_stack + 1);
 	    
@@ -8216,28 +8260,31 @@ do_trace(char *msg, char *fname, char *post)
 }
 #endif
 
-static void
-resolve_table(struct program *prog, struct fkntab *tab)
-{
-    int i;
+#include "master.t"
 
-    for (i = 0; tab[i].name; i++)
+void
+resolve_master_fkntab()
+{
+    extern struct object *master_ob;
+    struct program *prog = master_ob->prog;
+
+    struct fkntab *tab;
+
+    for (tab = master_fkntab; tab->name; tab++)
     {
-	if (search_for_function(tab[i].name, prog))
+	if (search_for_function(tab->name, prog))
 	{
-	    tab[i].inherit_index = function_inherit_found;
-	    tab[i].function_index = function_index_found;
+	    tab->inherit_index = function_inherit_found;
+	    tab->function_index = function_index_found;
 	}
 	else
 	{
-	    tab[i].inherit_index = (unsigned short)-1;
-	    tab[i].function_index = (unsigned short)-1;
+	    tab->inherit_index = (unsigned short)-1;
+	    tab->function_index = (unsigned short)-1;
 	}
     }
 }
 
-#include "master.t"
-	    
 struct svalue *
 apply_master_ob(int fun, int num_arg)
 {
@@ -8260,15 +8307,6 @@ apply_master_ob(int fun, int num_arg)
     return &retval;
 }
 
-void
-master_ob_loaded()
-{
-    extern struct object *master_ob;
-
-    resolve_table(master_ob->prog, master_fkntab);
-    load_parse_information();
-}
-	    
 /*EOT*/
 	    
 /*
@@ -8318,6 +8356,7 @@ stack_swap_objects(struct object *ob1, struct object *ob2)
 	else if (cspi->prev_ob == ob2)
 	    cspi->prev_ob = ob1;
     }
+    /* FIXME: Process error-stack and data-stack as well. */
 }    
 
 #ifdef TRACE_CODE
@@ -8366,4 +8405,3 @@ call_efun(int instruction, int numa)
     }
     efun_table[instruction](numa);
 }
-

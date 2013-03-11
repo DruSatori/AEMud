@@ -7,7 +7,7 @@
 #include "object.h"
 #include "hash.h"
 #include "simulate.h"
-
+#include "exec.h"
 /*
  * Object name hash table.  Object names are unique, so no special
  * problems - like stralloc.c.  For non-unique hashed names, we need
@@ -32,22 +32,18 @@ static struct object *(obj_table[OTABLE_SIZE]);
  */
 
 
-#if defined(ultrix) && !defined(__GNUC__)
-#define ObjHash(s) (hashstr((s), 100, OTABLE_SIZE))
-#else
 #if BITNUM(OTABLE_SIZE) == 1
 /* This one only works for even power-of-2 table size, but is faster */
 #define ObjHash(s) (hashstr16((s), 100) & ((OTABLE_SIZE)-1))
 #else
 #define ObjHash(s) (hashstr((s), 100, OTABLE_SIZE))
 #endif
-#endif
 
 /*
  * Looks for obj in table, moves it to head.
  */
 
-static int obj_searches = 0, obj_probes = 0, objs_found = 0;
+static long long obj_searches = 0, obj_probes = 0, objs_found = 0;
 
 static struct object * 
 find_obj_n(char *s)
@@ -90,9 +86,33 @@ static int objs_in_table = 0;
 void 
 enter_object_hash(struct object *ob)
 {
-    struct object * s;
+    struct object *s, *sibling;
     int h = ObjHash(ob->name);
-    
+
+   /* Add to object list */
+    if (ob->flags & O_CLONE && ob->prog->clones) {
+	sibling = ob->prog->clones;
+	ob->next_all = sibling;
+	ob->prev_all = sibling->prev_all;
+	sibling->prev_all->next_all = ob;
+	sibling->prev_all = ob;
+	if (sibling == obj_list)
+	    obj_list = ob;
+    } else if (obj_list) {
+	ob->next_all = obj_list;
+	ob->prev_all = obj_list->prev_all;
+	obj_list->prev_all->next_all = ob;
+	obj_list->prev_all = ob;
+	obj_list = ob;
+    }
+    else
+	obj_list = ob->next_all = ob->prev_all = ob;
+
+    if (ob->flags & O_CLONE) {
+	ob->prog->clones = ob;
+	ob->prog->num_clones++;
+    }
+
     s = find_obj_n(ob->name);
     if (s) {
 	if (s != ob)
@@ -108,7 +128,6 @@ enter_object_hash(struct object *ob)
     ob->next_hash = obj_table[h];
     obj_table[h] = ob;
     objs_in_table++;
-	return;
 }
 
 /*
@@ -130,8 +149,26 @@ remove_object_hash(struct object *ob)
     
     obj_table[h] = ob->next_hash;
     ob->next_hash = 0;
-	objs_in_table--;
-	return;
+    objs_in_table--;
+
+    if (ob->flags & O_CLONE)
+	ob->prog->num_clones--;
+    if (ob->prog->clones == ob) {
+	if (ob->next_all->prog == ob->prog &&
+	    ob->next_all->flags & O_CLONE &&
+	    ob->next_all != ob)
+	    ob->prog->clones = ob->next_all;
+	else
+	    ob->prog->clones = NULL;
+    }
+    if (ob->next_all == ob)
+	obj_list = NULL;
+    else if (ob == obj_list)
+	obj_list = ob->next_all;
+
+    ob->prev_all->next_all = ob->next_all;
+    ob->next_all->prev_all = ob->prev_all;
+    
 }
 
 /*
@@ -162,8 +199,8 @@ add_otable_status(char *debinf)
     (void)strcat(debinf, "------------------------------\n");
     (void)sprintf(debinf + strlen(debinf), "Average hash chain length            %.2f\n",
 		  (double)objs_in_table / OTABLE_SIZE);
-    (void)sprintf(debinf + strlen(debinf), "Searches/average search length       %d (%.2f)\n",
-		  obj_searches, (double)obj_probes / obj_searches);
+    (void)sprintf(debinf + strlen(debinf), "Searches/average search length       %lld (%.2f)\n",
+		  obj_searches, (double)obj_probes / (double)obj_searches);
     (void)sprintf(debinf + strlen(debinf), "External lookups succeeded (succeed) %d (%d)\n",
 		  user_obj_lookups, user_obj_found);
 }

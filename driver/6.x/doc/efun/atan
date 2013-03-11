@@ -1,12 +1,12 @@
 NAME
-	atan - arcus tangent
+        atan - trigonometric function operating on float
 
-SYNTAX
-	float atan(float v);
+SYNOPSIS
+        float   atan(float)
 
 DESCRIPTION
-	Return the arctan value of v, given in radians.
+        atan() returns the arc-tangent of a floating point number.
+        The value returned is in radians.
 
 SEE ALSO
-	cos, sin, tan, asin, acos, sqrt, log, pow, exp
-
+        math - for a list of other math functions available.

@@ -32,11 +32,13 @@
 #include <stdio.h>
 #include <string.h>
 #include <errno.h>
+#include <time.h>
 #include <unistd.h>
 #include <sys/types.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/telnet.h>
+#include <netdb.h>
 #include "config.h"
 #include "patchlevel.h"
 #include "lint.h"
@@ -48,8 +50,8 @@
 #include "net.h"
 #include "telnet.h"
 #include "comm.h"
-
-struct interactive;
+#include "object.h"
+#include "backend.h"
 
 #ifndef EPROTO
 #define	EPROTO	EPROTOTYPE
@@ -65,12 +67,12 @@ struct interactive;
 #define	TELNET_CANQ_SIZE	512
 #define	TELNET_RAWQ_SIZE	256
 #define	TELNET_OPTQ_SIZE	512
-#define	TELNET_OUTQ_SIZE	(8192 + 1024)
+#define	TELNET_OUTQ_SIZE	(16*1024 + 1024)
 
 /*
  * Output Queue Flow Control Parameters.
  */
-#define	TELNET_OUTQ_LOWAT       256
+#define	TELNET_OUTQ_LOWAT       (TELNET_OUTQ_SIZE/2)
 #define	TELNET_OUTQ_HIWAT       (TELNET_OUTQ_SIZE - 256)
 
 /*
@@ -88,7 +90,7 @@ struct interactive;
  * and receive buffers to 4k.  It makes more sense to increase the
  * send size and reduce the receive size for a MUD.
  */
-#define	TELNET_RCVBUF_SIZE	4096
+#define	TELNET_RCVBUF_SIZE	2048
 #define	TELNET_SNDBUF_SIZE	TELNET_OUTQ_SIZE
 
 /*
@@ -101,6 +103,10 @@ struct interactive;
 #define	CR			13
 #define	DEL			127
 
+static void telnet_interactive(void *vp);
+static void telnet_input(telnet_t *tp);
+static void telnet_readbytes(ndesc_t *nd, telnet_t *tp);
+
 /*
  * Allocate a Telnet control block.
  */
@@ -111,7 +117,7 @@ telnet_alloc(void)
     telnet_t *tp;
 
     tp = xalloc(sizeof (telnet_t));
-    tp->t_flags = TF_ENABW;
+    tp->t_flags = 0;
     tp->t_state = TS_DATA;
     tp->t_nd = NULL;
     tp->t_rawq = nq_alloc(TELNET_RAWQ_SIZE);
@@ -121,7 +127,8 @@ telnet_alloc(void)
     tp->t_ip = NULL;
     tp->t_rblen = 0;
     tp->t_sblen = 0;
-
+    tp->task = NULL;
+    
     for (i = 0; i < OP_SIZE; i++)
     {
 	tp->t_optb[i].o_us = OS_NO;
@@ -144,9 +151,37 @@ telnet_free(telnet_t *tp)
     if (tp->t_optq != NULL)
 	nq_free(tp->t_optq);
     nq_free(tp->t_outq);
+    if (tp->task)
+	remove_task(tp->task);
+    tp->task = NULL;
     free(tp);
 }
 
+/*
+ * Flush the output queue.
+ */
+static void
+telnet_flush(telnet_t *tp)
+{
+    if (!nq_empty(tp->t_outq))
+	nq_send(tp->t_outq, nd_fd(tp->t_nd), &tp->t_sblen);
+}
+
+/*
+ * Close a Telnet session and free the associated resources.
+ */
+static void
+telnet_shutdown(ndesc_t *nd, telnet_t *tp)
+{
+    if (tp != NULL)
+    {
+	telnet_flush(tp);
+	telnet_free(tp);
+    }
+
+    (void)close(nd_fd(nd));
+    nd_detach(nd);
+}
 /*
  * Associate a Telnet control block with an interactive object.
  */
@@ -166,33 +201,10 @@ telnet_detach(telnet_t *tp)
     if ((tp->t_flags & TF_ATTACH) == 0)
 	return;
 
-    tp->t_flags ^= TF_ATTACH;
+    tp->t_flags &= ~TF_ATTACH;
     tp->t_ip = NULL;
-
-    nd_enable(tp->t_nd, ND_C);
-}
-
-/*
- * Flush the output queue.
- */
-static void
-telnet_flush(telnet_t *tp)
-{
-    if (!nq_empty(tp->t_outq))
-	nq_send(tp->t_outq, nd_fd(tp->t_nd), &tp->t_sblen);
-}
-
-/*
- * Re-enable raw queue (if blocked).
- */
-static void
-telnet_enabr(telnet_t *tp)
-{
-    if (tp->t_flags & TF_ENABR)
-    {
-	tp->t_flags &= ~TF_ENABR;
-	nd_enable(tp->t_nd, ND_R);
-    }
+    if (!tp->task)
+	tp->task = create_task(telnet_interactive, tp);
 }
 
 /*
@@ -201,24 +213,22 @@ telnet_enabr(telnet_t *tp)
 static void
 telnet_enabw(telnet_t *tp)
 {
-    if (tp->t_flags & TF_ENABW)
-    {
-	tp->t_flags &= ~TF_ENABW;
-	nd_enable(tp->t_nd, ND_W);
-    }
+    nd_enable(tp->t_nd, ND_W);
 }
 
 /*
- * Append a character to the output queue, encapsulating it appropriately.
+ * Append a character string to the output queue, encapsulating it 
+ * appropriately.
+ * Returns 1 in case the message is truncated.
  */
-void
+int
 telnet_output(telnet_t *tp, u_char *cp)
 {
     int len;
     u_char c, *bp, buf[TELNET_OUTQ_SIZE + 3];
 
     if (tp->t_flags & TF_OVFLOUTQ)
-	return;
+	return 1;
 
     bp = buf;
 
@@ -243,7 +253,7 @@ telnet_output(telnet_t *tp, u_char *cp)
     len = bp - buf;
 
     if (len == 0)
-	return;
+	return 0;
 
     if (nq_len(tp->t_outq) + len >= TELNET_OUTQ_HIWAT)
     {
@@ -251,14 +261,19 @@ telnet_output(telnet_t *tp, u_char *cp)
 	if (nq_len(tp->t_outq) + len >= TELNET_OUTQ_HIWAT)
 	{
 	    tp->t_flags |= TF_OVFLOUTQ;
+	    buf[TELNET_OUTQ_HIWAT - nq_len(tp->t_outq)] = '\0';
+	    nq_puts(tp->t_outq, buf);
+	    nq_puts(tp->t_outq, (u_char *)"*** Truncated. ***\r\n");
+
 	    telnet_enabw(tp);
-	    return;
+	    return 1;
 	}
     }
 
     nq_puts(tp->t_outq, buf);
 
     telnet_enabw(tp);
+    return 0;
 }
 
 /*
@@ -270,7 +285,9 @@ telnet_disconnect(telnet_t *tp)
     if ((tp->t_flags & TF_ATTACH) == 0)
 	return;
 
-    remove_interactive(tp->t_ip, 1);
+    tp->t_flags |= TF_DISCONNECT;
+    if (!tp->task)
+	tp->task = create_task(telnet_interactive, tp);
 }
 
 /*
@@ -318,28 +335,74 @@ telnet_optq_putc(telnet_t *tp, u_char c)
 static void
 telnet_eol(telnet_t *tp)
 {
-    char *cp;
-
     if (tp->t_flags & TF_SYNCH)
 	return;
 
     if (nq_full(tp->t_canq))
     {
 	tp->t_flags &= ~TF_OVFLCANQ;
-	cp = "";
     }
     else
     {
 	nq_putc(tp->t_canq, '\0');
-	cp = (char *)nq_rptr(tp->t_canq);
     }
 
-    if (tp->t_flags & TF_ATTACH)
+    tp->t_flags |= TF_INPUT;
+}
+
+static void
+telnet_interactive(void *vp)
+{
+    telnet_t *tp = vp;
+    char *cp;
+    
+    if (!(tp->t_flags & TF_ATTACH)) {
+	tp->task = NULL;
+	telnet_shutdown(tp->t_nd, tp);
+	return;
+    }
+    if (tp->t_flags & TF_DISCONNECT) {
+	tp->t_flags &= ~TF_DISCONNECT;
+	if (tp->t_ip)
+	    remove_interactive(tp->t_ip, 1);
+    }
+    if (!(tp->t_flags & TF_ATTACH)) {
+	tp->task = NULL;
+	telnet_shutdown(tp->t_nd, tp);
+	return;
+    }
+    if (tp->t_flags & TF_OVFLOUTQ) {
+	tp->task = NULL;
+	return;
+    }
+    if (tp->t_flags & TF_INPUT) {
+	tp->t_flags &= ~TF_INPUT;
+	if (nq_full(tp->t_canq))
+	    cp = "";
+	else
+	    cp = (char *)nq_rptr(tp->t_canq);
 	interactive_input(tp->t_ip, cp);
-
-    nq_init(tp->t_canq);
-
+	nq_init(tp->t_canq);
+    }
+    if (!(tp->t_flags & TF_ATTACH)) {
+	tp->task = NULL;
+	telnet_shutdown(tp->t_nd, tp);
+	return;
+    }
     tp->t_flags &= ~TF_GA;
+    telnet_readbytes(tp->t_nd, tp);
+    telnet_input(tp);
+    if (!(tp->t_flags & TF_ATTACH)) {
+	tp->task = NULL;
+	telnet_shutdown(tp->t_nd, tp);
+	return;
+    }
+    if (tp->t_flags & (TF_INPUT|TF_DISCONNECT)) {
+	reschedule_task(tp->task);
+	return;
+    }
+    tp->task = NULL;
+    nd_enable(tp->t_nd, ND_R);
 }
 
 /*
@@ -356,13 +419,13 @@ telnet_dm(telnet_t *tp)
  * Process an Are You There.
  */
 static void
-telnet_ayt(ndesc_t *nd, telnet_t *tp)
+telnet_ayt(telnet_t *tp)
 {
-    u_char version[13];
+    char version[24];
 
-    sprintf(version, "[%6.6s%02d]\r\n", GAME_VERSION, PATCH_LEVEL);
+    snprintf(version, sizeof(version), "[%6.6s%02d]\r\n", GAME_VERSION, PATCH_LEVEL);
 
-    nq_puts(tp->t_outq, version);
+    nq_puts(tp->t_outq, (u_char *)version);
 
     telnet_enabw(tp);
 }
@@ -696,104 +759,6 @@ telnet_neg_ldisab(telnet_t *tp, u_char opt)
 }
 
 /*
- * Negotiate enabling an option in the remote-to-local direction.
- */
-static void
-telnet_neg_renab(telnet_t *tp, u_char opt)
-{
-    opt_t *op;
-
-    op = telnet_get_optp(tp, opt);
-    if (op == NULL)
-	return;
-
-    switch (op->o_him)
-    {
-    case OS_NO:
-        op->o_him = OS_WANTYES;
-        telnet_send_do(tp, opt);
-        break;
-
-    case OS_YES:
-        break;
-
-    case OS_WANTNO:
-        switch (op->o_himq)
-        {
-        case OQ_EMPTY:
-            op->o_himq = OQ_OPPOSITE;
-            break;
-
-        case OQ_OPPOSITE:
-            break;
-        }
-        break;
-
-    case OS_WANTYES:
-        switch (op->o_himq)
-        {
-        case OQ_EMPTY:
-            break;
-
-        case OQ_OPPOSITE:
-            op->o_himq = OQ_EMPTY;
-            break;
-        }
-        break;
-    }
-}
-
-#if 0
-/*
- * Negotiate disabling an option in the remote-to-local direction.
- */
-static void
-telnet_neg_rdisab(telnet_t *tp, u_char opt)
-{
-    opt_t *op;
-
-    op = telnet_get_optp(tp, opt);
-    if (op == NULL)
-	return;
-
-    switch (op->o_him)
-    {
-    case OS_NO:
-        break;
-
-    case OS_YES:
-        op->o_him = OS_WANTNO;
-        telnet_send_dont(tp, opt);
-        break;
-
-    case OS_WANTNO:
-        switch (op->o_himq)
-        {
-        case OQ_EMPTY:
-            break;
-
-        case OQ_OPPOSITE:
-            op->o_himq = OQ_EMPTY;
-            break;
-        }
-        break;
-
-    case OS_WANTYES:
-        switch (op->o_himq)
-        {
-        case OQ_EMPTY:
-            op->o_himq = OQ_OPPOSITE;
-            break;
-
-        case OQ_OPPOSITE:
-            break;
-        }
-        break;
-    }
-}
-#endif
-
-/*
  * Enable Remote Echo.
  */
 void
@@ -1074,19 +1039,11 @@ telnet_dont(telnet_t *tp, u_char opt)
  * queue to the canonical queue.
  */
 static void
-telnet_input(ndesc_t *nd, telnet_t *tp)
+telnet_input(telnet_t *tp)
 {
     u_char c;
-
     while (!nq_empty(tp->t_rawq))
     {
-	if (nq_avail(tp->t_outq) < TELNET_OUTQ_REQUIRED)
-	{
-	    tp->t_flags |= TF_FLOWC;
-	    nd_disable(nd, ND_C);
-	    return;
-	}
-
         c = nq_getc(tp->t_rawq);
 
 	switch (tp->t_state)
@@ -1103,8 +1060,8 @@ telnet_input(ndesc_t *nd, telnet_t *tp)
 
 	    case LF:
 		telnet_eol(tp);
-		return;
-
+                return;
+                
             case CR:
                 tp->t_state = TS_CR;
                 break;
@@ -1126,7 +1083,7 @@ telnet_input(ndesc_t *nd, telnet_t *tp)
 	case TS_CR:
 	    telnet_eol(tp);
             tp->t_state = TS_DATA;
-	    return;
+            return;
 
 	case TS_IAC:
             tp->t_state = TS_DATA;
@@ -1137,7 +1094,7 @@ telnet_input(ndesc_t *nd, telnet_t *tp)
                 break;
 
 	    case AYT:
-		telnet_ayt(nd, tp);
+		telnet_ayt(tp);
 		break;
 
 	    case EC:
@@ -1239,17 +1196,13 @@ telnet_input(ndesc_t *nd, telnet_t *tp)
     }
 
     nq_init(tp->t_rawq);
-
-    telnet_enabr(tp);
-
-    nd_disable(nd, ND_C);
 }
 
 /*
  * Read data from the Telnet session to the raw input queue.
  */
 static void
-telnet_read(ndesc_t *nd, telnet_t *tp)
+telnet_readbytes(ndesc_t *nd, telnet_t *tp)
 {
     int cc;
 
@@ -1286,18 +1239,24 @@ telnet_read(ndesc_t *nd, telnet_t *tp)
 	    return;
 	}
 
-	if ((tp->t_flags & TF_FLOWC) == 0)
-	    nd_enable(nd, ND_C);
-
-	telnet_enabr(tp);
-
 	if (!nq_full(tp->t_rawq))
 	    return;
     }
 
-    tp->t_flags |= TF_ENABR;
-    nd_disable(nd, ND_R);
 }
+
+static void
+telnet_read(ndesc_t *nd, telnet_t *tp)
+{
+    telnet_readbytes(nd, tp);
+    telnet_input(tp);
+    if (tp->t_flags & (TF_INPUT|TF_DISCONNECT)) {
+	if (!tp->task)
+	    tp->task = create_task(telnet_interactive, tp);
+	nd_disable(tp->t_nd, ND_R);
+    }
+}
+    
 
 /*
  * Write data from the output queue to the Telnet session.
@@ -1328,16 +1287,9 @@ telnet_write(ndesc_t *nd, telnet_t *tp)
 	if (nq_len(tp->t_outq) < TELNET_OUTQ_LOWAT)
 	{
 	    tp->t_flags &= ~TF_OVFLOUTQ;
-	    nq_puts(tp->t_outq, (u_char *)"*** Truncated. ***\r\n");
-	}
-    }
-
-    if (tp->t_flags & TF_FLOWC)
-    {
-	if (nq_len(tp->t_outq) < TELNET_OUTQ_HIWAT)
-	{
-	    tp->t_flags &= ~TF_FLOWC;
-	    nd_enable(nd, ND_C);
+	    if (tp->t_flags & (TF_INPUT|TF_DISCONNECT) &&
+		!tp->task) /* Reenable command processing */
+		tp->task = create_task(telnet_interactive, tp);
 	}
     }
 
@@ -1346,7 +1298,6 @@ telnet_write(ndesc_t *nd, telnet_t *tp)
 
     nq_init(tp->t_outq);
 
-    tp->t_flags |= TF_ENABW;
     nd_disable(nd, ND_W);
 }
 
@@ -1361,58 +1312,44 @@ telnet_exception(ndesc_t *nd, telnet_t *tp)
     nd_disable(nd, ND_X);
 }
 
-/*
- * Close a Telnet session and free the associated resources.
- */
-static void
-telnet_shutdown(ndesc_t *nd, telnet_t *tp)
-{
-    if (tp != NULL)
-    {
-	telnet_flush(tp);
-	telnet_free(tp);
-    }
-
-    (void)close(nd_fd(nd));
-    nd_detach(nd);
-}
-
-/*
- * Telnet session cleanup processing.
- */
-static void
-telnet_cleanup(ndesc_t *nd, telnet_t *tp)
-{
-    if ((tp->t_flags & TF_ATTACH) == 0)
-    {
-	telnet_shutdown(nd, tp);
-    }
-    else
-    {
-	telnet_input(nd, tp);
-    }
-}
 
 /*
  * Accept a new Telnet connection.
  */
 static void
-telnet_accept(ndesc_t *nd, void *vp)
+telnet_accept(void *vp)
 {
-    int addrlen, s;
-    struct sockaddr_in addr;
+    ndesc_t *nd = vp;
+    int s;
+    u_short local_port;
+
+    socklen_t addrlen;
+    struct sockaddr_storage addr;
     telnet_t *tp;
     void *ip;
+    char host[NI_MAXHOST], port[NI_MAXSERV];
+    
+    nd_enable(nd, ND_R);
+
+    /* Get the port number of the accepting socket */
+    addrlen = sizeof(addr);
+    if (getsockname(nd_fd(nd), (struct sockaddr *)&addr, &addrlen))
+        return;
+
+    getnameinfo((struct sockaddr *)&addr, addrlen, host, sizeof(host), port, sizeof(port), NI_NUMERICHOST | NI_NUMERICSERV);
+    local_port = atoi(port);
 
     addrlen = sizeof (addr);
-
     s = accept(nd_fd(nd), (struct sockaddr *)&addr, &addrlen);
     if (s == -1)
     {
 	switch (errno)
 	{
 	default:
-	    fatal("telnet_accept: accept() errno = %d.\n", errno);
+            getnameinfo((struct sockaddr *)&addr, addrlen, host, sizeof(host), port, sizeof(port), NI_NUMERICHOST | NI_NUMERICSERV);
+            
+            warning("telnet_accept: accept() errno = %d. ip: [%s]:%s\n",
+                errno, host, port);
 	case EWOULDBLOCK:
 	case EINTR:
 	case EPROTO:
@@ -1422,68 +1359,90 @@ telnet_accept(ndesc_t *nd, void *vp)
 
     enable_nbio(s);
     enable_oobinline(s);
+    enable_nodelay(s);
     enable_lowdelay(s);
+    enable_keepalive(s);
     set_rcvsize(s, TELNET_RCVBUF_SIZE);
     set_sndsize(s, TELNET_SNDBUF_SIZE);
 
     tp = telnet_alloc();
-    nd = nd_attach(s, telnet_read, telnet_write, telnet_exception,
-	     telnet_cleanup, telnet_shutdown, tp);
-    tp->t_nd = nd;
-
-    ip = (void *)new_player(tp, &addr, addrlen);
+    tp->t_nd = nd_attach(s, telnet_read, telnet_write, telnet_exception,
+			 NULL, telnet_shutdown, tp);
+    ip = (void *)new_player(tp, &addr, addrlen, local_port);
     if (ip == NULL)
     {
-	telnet_shutdown(nd, tp);
+	telnet_shutdown(tp->t_nd, tp);
     }
     else
     {
 	telnet_attach(tp, ip);
-	nd_enable(nd, ND_R | ND_X | ND_C);
+	nd_enable(tp->t_nd, ND_R | ND_X);
     }
+}
+
+static void
+telnet_ready(ndesc_t *nd, void *vp)
+{
+    nd_disable(nd, ND_R);
+    create_task(telnet_accept, nd);
 }
 
 /*
  * Initialize the Telnet server.
  */
 void
-telnet_init(u_short port)
+telnet_init(u_short port_nr)
 {
-    int s;
-    struct sockaddr_in addr;
+    int s = -1, e;
+    struct addrinfo hints;
+    struct addrinfo *res, *rp;    
     ndesc_t *nd;
+    char host[NI_MAXHOST], port[NI_MAXSERV];
+    
+    memset(&hints, 0, sizeof(hints));
+    hints.ai_family = AF_UNSPEC;
+    hints.ai_flags = AI_PASSIVE;
+    hints.ai_socktype = SOCK_STREAM;
 
-    s = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-    if (s == -1)
-	fatal("telnet_init: socket() error = %d.\n", errno);
+    snprintf(port, sizeof(port), "%d", port_nr);    
+    if ((e = getaddrinfo(NULL, port, &hints, &res)))
+        fatal("telnet_init: %s\n", gai_strerror(e));
 
-    enable_reuseaddr(s);
-
-    memset(&addr, 0, sizeof (addr));
-    addr.sin_family = AF_INET;
-    addr.sin_port = htons(port);
-    addr.sin_addr.s_addr = INADDR_ANY;
-
-    if (bind(s, (struct sockaddr *)&addr, sizeof (addr)) == -1)
+    for (rp = res; rp != NULL; rp = rp->ai_next)
     {
-	if (errno == EADDRINUSE)
-	{
-	    (void)fprintf(stderr, "Socket already bound!\n");
-	    debug_message("Socket already bound!\n");
-	    exit(errno);
-	}
-	else
-	{
-	    fatal("telnet_init: bind() error = %d.\n", errno);
-	}
+        if ((s = socket(rp->ai_family, rp->ai_socktype, rp->ai_protocol)) == -1)
+            fatal("telnet_init: socket() error = %d.\n", errno);
+
+        getnameinfo(rp->ai_addr, rp->ai_addrlen, host, sizeof(host), port, sizeof(port), NI_NUMERICHOST | NI_NUMERICSERV);
+       
+        enable_reuseaddr(s);
+
+        if (rp->ai_family == AF_INET6)
+            enable_v6only(s);
+
+        if (bind(s, rp->ai_addr, rp->ai_addrlen) == 0)
+        {
+            /* Success */
+            printf("Listening to telnet port: %s:%s\n",  host, port);
+            enable_nbio(s);
+
+            if (listen(s, 5) == -1)
+                fatal("telnet_init: listen() error = %d.\n", errno);
+
+            nd = nd_attach(s, telnet_ready, NULL, NULL, NULL, telnet_shutdown, NULL);
+            nd_enable(nd, ND_R);
+            
+        }
+        else
+        {
+            if (errno == EADDRINUSE)
+            {
+                fatal("Telnet socket already bound: %s:%s\n", host, port);
+            }
+            else
+            {
+                fatal("telnet_init: bind() error = %d.\n", errno);
+            }
+        }
     }
-
-    if (listen(s, 5) == -1)
-	fatal("telnet_init: listen() error = %d.\n", errno);
-
-    enable_nbio(s);
-
-    nd = nd_attach(s, telnet_accept, NULL, NULL, NULL, telnet_shutdown,
-		    NULL);
-    nd_enable(nd, ND_R);
 }

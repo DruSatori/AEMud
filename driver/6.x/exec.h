@@ -48,18 +48,17 @@ struct cfun_desc
 #define R_CALL 2
 
 struct function {
+#if defined(PROFILE_LPC)
+    unsigned long long num_calls;	/* Number of times this function called */
+    double time_spent;	/* cpu spent inside this function */
+    double tot_time_spent; /* cpu spent inside this function and those called by it */
+    double avg_time;    
+    double avg_tot_time;    
+    double avg_calls;
+    double last_call_update;
+#endif
     char *name;
 
-#if defined(PROFILE_FUNS) && defined(RUSAGE)
-    unsigned long time_spent;	/* cpu spent inside this function */
-    unsigned int  num_calls;	/* Number of times this function called */
-#ifdef SOLARIS
-    long ticks_call;
-#else
-    int stime_call;		/* (s) time of last call made */
-    int utime_call;		/* (us) time of last call made */
-#endif
-#endif
     short hash_idx;
     unsigned short type_flags;	/* Return type of function. See below. */
 				/* NAME_ . See above. */
@@ -72,6 +71,7 @@ struct function {
 				   in this object. Probably inherited */
     char first_default;
 };				
+
 struct function_hash {
     char *name;
     short next_hashed_function;
@@ -138,12 +138,19 @@ extern struct segment_desc segm_desc[];
 #define S_NULL 3
 #define S_NUM  4
 
+struct lineno {
+  unsigned short code;
+  unsigned short file;
+  unsigned int lineno;
+};
+
+  
 struct program {
     char *program;			/* The binary instructions */
     char *name;				/* Name of file that defined prog */
     struct program *next_all, *prev_all; /* pointers in the list of all
 					    programs. */
-    char *line_numbers;                 /* Line number information
+    struct lineno *line_numbers;        /* Line number information
 					   This is not stored in memory
 					   but swapped in when needed.
 					 */
@@ -168,12 +175,16 @@ struct program {
     unsigned short *type_start;
 
     char *include_files;
-
-#if defined(RUSAGE) && defined(PROFILE_OBJS)
-    long cpu;				/* The amount of cpu taken up */
+    struct object *clones;
+    
+#if defined(PROFILE_LPC)
+    double cpu;				/* The amount of cpu taken up */
+    double cpu_avg;
+    double last_avg_update;
 #endif
     int ref;				/* Reference count */
     int swap_num;
+    long num_clones;
     unsigned int time_of_ref;
     
 #ifdef DEBUG
@@ -204,8 +215,8 @@ struct program {
     unsigned short num_variables;
     unsigned short num_inherited;
 
-    unsigned short sizeof_include_files;
     unsigned short sizeof_line_numbers;
+    unsigned short sizeof_include_files;
     unsigned short sizeof_argument_types;
     char flags;                         /* some useful flags */
 #define PRAGMA_NO_CLONE		1

@@ -4,25 +4,15 @@
 #include <stdlib.h>
 #include <time.h>
 #include <sys/time.h>
-#ifdef RANDOM
 #include <math.h>
-#endif
 
 #include "config.h"
 #include "lint.h"
 
-#ifdef DRAND48
-#include "drand48.h"
-#endif
+double random_float(int, char*);
 
-#ifdef sun
-time_t time (time_t *);
-#endif
-
-double random_float(void);
-
-extern int current_time;
-extern int alarm_time;
+double current_time;
+double alarm_time;
 
 /*
  * This file defines things that may have to be changed when porting
@@ -48,66 +38,56 @@ static unsigned long newstate[] = {
  * Return a random argument in the range 0 .. n-1.
  * If a new seed is given, apply that before computing the random number.
  */
-int
-random_number(int n, int seed)
+long long
+random_number(long long n, int seedlen, char *seed)
 {
-#ifdef RANDOM
-    long rnd;
-    char *oldstate;
-#else
-#ifdef DRAND48
-    unsigned short newseed[3];
-#endif
-#endif
-
-    /* n should not be zero or negative
-    */
-    if (n < 1)
-	n = 1;
-
-#ifdef RANDOM
-    if (seed == 0)
-	return (int)(random() % n);
-    else
-    {
-	/*
-	 * Cavort and prance. All in order to preserve the old seed.
-	 */
-	
-	initstate(seed, (char *)newstate, 128);
-	oldstate = (char*)setstate((char *)newstate);
-	rnd = random() % n;
-	setstate(oldstate);
-	return (int)rnd;
-    }
-#else /* RANDOM */
-#ifdef DRAND48
-    if (seed == 0)
-	return (int)(drand48() * n);
-    else
-    {
-	newseed[0] = seed & 0xffff;
-	newseed[2] = ((unsigned)seed >> 16) & 0xffff;
-	newseed[1] = newseed[0] ^ newseed[2];
-	return (int)(erand48(newseed) * n);
-    }
-#else /* DRAND48 */
-    if (seed == 0)
-	return current_time % n;	/* Suit yourself */
-    else
-	return seed % n;
-#endif /* DRAND48 */
-#endif /* RANDOM */
+    return (long long)(random_float(seedlen, seed) * n);
 }
 
 double
-random_float()
+random_float(int seedlen, char *seedarr)
 {
-#ifdef RANDOM
-    return ldexp((double)random(), -32);
+    double retval;
+#ifdef DRAND48
+    unsigned short newseed[3];
+    char *seedstart;
+    int i;
+    if (seedlen) {
+        newseed[0] = 0;
+        newseed[1] = 0;
+        newseed[2] = 0;
+        seedstart = (char *)newseed;
+        for (i = 0; i < seedlen; i++) {
+            seedstart[i % sizeof(newseed)] ^= seedarr[i];
+        }
+        retval = ((double)nrand48(newseed))/(double) (1ll<<31);
+        retval = (retval + (double)nrand48(newseed))/(double) (1ll<<31);
+    } else {
+        retval = ((double)lrand48())/(double) (1ll<<31);
+        retval = (retval + (double)lrand48())/(double) (1ll<<31);
+    }
 #else
-    return drand48();
+#ifdef RANDOM
+    char *oldstate;
+    unsigned int i, seed; 
+    if (seedllen) {
+        seed = 0;
+        for(i = 0; i < seedlen; i++) {
+            seed = (seed << 8) ^ ((seed >> 24) & 0xff) ^ seedarr[i] & 0xff;
+        }
+        initstate(seed, (char *)newstate, 128);
+        oldstate = (char*)setstate((char *)newstate);
+    }
+    retval = ((double)random())/(double) (1ll<<31);
+    retval = ((retval + (double)random())/(double) (1ll<<31);
+    if (seedlen) {
+	setstate(oldstate);
+    }
+#else
+#error No random generator specified!
 #endif
+#endif
+    return retval;
 }
 /*
  * The function time() can't really be trusted to return an integer.
@@ -123,27 +103,25 @@ random_float()
 void 
 set_current_time() 
 {
-    static long alarm_base_time, alarm_last_time;
+    static double alarm_base_time, alarm_last_time;
     struct timeval tv;
 
     (void)gettimeofday(&tv, NULL);
+    current_time = tv.tv_sec + tv.tv_usec * 1e-6;
 
     if (alarm_base_time == 0)
-	alarm_base_time = tv.tv_sec;
+	alarm_base_time = current_time;
 
-    alarm_time = (tv.tv_sec - alarm_base_time) * TIME_RES +
-		 tv.tv_usec * TIME_RES / 1000000;
+    alarm_time = current_time - alarm_base_time;
     if (alarm_time < alarm_last_time) {
-	alarm_base_time -= (alarm_last_time - alarm_time) / TIME_RES;
-	alarm_time += alarm_last_time - alarm_time + TIME_RES;
+        alarm_time = alarm_last_time;
+        alarm_base_time = current_time - alarm_time;
     }
     alarm_last_time = alarm_time;
-    current_time = tv.tv_sec;
 }
 
 char *
-time_string(int t)
+time_string(time_t t)
 {
-    time_t x = t;
-    return ctime(&x);
+    return ctime(&t);
 }

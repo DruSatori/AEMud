@@ -1,4 +1,4 @@
-#if defined(PROFILE) || !defined(__GNUC__)
+#if defined(PROFILE)
 int equal_svalue(const struct svalue *, const struct svalue *);
 #else /* PROFILE */
 static __inline__ int
@@ -10,8 +10,8 @@ equal_svalue(const struct svalue *sval1, const struct svalue *sval2)
     else if (sval2->type == T_NUMBER && sval2->u.number == 0 &&
 	     sval1->type == T_OBJECT && sval1->u.ob->flags & O_DESTRUCTED)
 	return 1;
-    else if (sval2->type == T_NUMBER && sval2->u.number == 0 &&
-	     sval1->type == T_FUNCTION && !legal_closure(sval1->u.func))
+    else if (sval1->type == T_NUMBER && sval1->u.number == 0 &&
+	     sval2->type == T_FUNCTION && !legal_closure(sval2->u.func))
 	return 1;
     else if (sval2->type == T_NUMBER && sval2->u.number == 0 &&
 	     sval1->type == T_FUNCTION && !legal_closure(sval1->u.func))
@@ -21,7 +21,7 @@ equal_svalue(const struct svalue *sval1, const struct svalue *sval2)
     else switch (sval1->type) {
 	case T_NUMBER:
 	    return sval1->u.number == sval2->u.number;
-	case T_ARRAY:
+	case T_POINTER:
 	    return sval1->u.vec == sval2->u.vec;
 	case T_MAPPING:
 	    return sval1->u.map == sval2->u.map;

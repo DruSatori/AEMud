@@ -1,8 +1,8 @@
 NAME
-	arrayp - determine if the value of a variable is an array
+	pointerp - determine if the value of a variable is an array
 
 SYNOPSIS
-	int arrayp(mixed testvar)
+	int pointerp(mixed testvar)
 
 DESCRIPTION
 	This function return 1 if `testvar' was of the type pointer,

@@ -1,12 +1,12 @@
 NAME
-	functionp - determine if the value of a variable is a function.
+  functionp - determine if the value of a variable is a function.
 
 SYNOPSIS
-	int functionp(mixed testvar)
+int functionp(mixed testvar)
 
 DESCRIPTION
-	This function returns 1 if the 'testvar' was of the type function,
-	and 0 otherwise.
+This function returns 1 if the 'testvar' was of the type function,
+and 0 otherwise.
 
 SEE ALSO
-	intp, stringp, arrayp, objectp, floatp, mappingp
+intp, stringp, pointerp, objectp, floatp, mappingp

@@ -9,6 +9,8 @@ extern struct interface efun;
 extern struct interface stdobject;
 extern struct interface gl_language;
 
+extern struct interface auto_interface;
+
 struct interface *(interface[]) = 
 {
     &efun,
@@ -16,7 +18,6 @@ struct interface *(interface[]) =
     &gl_language,
     (struct interface *)0,
 };
-
 
 void (*
 get_C_fun_address(char *prog_name, char *name))(struct svalue *)

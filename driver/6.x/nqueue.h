@@ -28,6 +28,8 @@
  * OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF
  * ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
+#ifndef _NQUEUE_H
+#define _NQUEUE_H
 
 typedef struct {
     u_short	nq_size;
@@ -53,3 +55,4 @@ void nq_puts(nqueue_t *, u_char *);
 void nq_unputc(nqueue_t *);
 int nq_recv(nqueue_t *, int, u_int *);
 int nq_send(nqueue_t *, int, u_int *);
+#endif

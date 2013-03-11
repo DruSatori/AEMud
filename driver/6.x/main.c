@@ -1,4 +1,3 @@
-#include "config.h"
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <fcntl.h>
@@ -9,11 +8,10 @@
 #include <string.h>
 #include <math.h>
 #include <signal.h>
-#if defined(sun) || defined(__osf__)
-#include <alloca.h>
-#endif
 #include <stdarg.h>
+#include <unistd.h>
 
+#include "config.h"
 #include "lint.h"
 #include "interpret.h"
 #include "object.h"
@@ -22,11 +20,8 @@
 #include "mudstat.h"
 #include "comm1.h"
 #include "simulate.h"
-#include "swap.h"
-
-#ifdef DRAND48
-#include "drand48.h"
-#endif
+#include "main.h"
+#include "backend.h"
 
 extern int current_line;
 
@@ -38,7 +33,9 @@ int no_ip_demon = 0;
 int unlimited = 0; /* Run without eval cost limits */
 int comp_flag = 0; /* Trace compilations */
 int warnobsoleteflag = 0;
+char *flag = NULL;
 int driver_mtime;
+char *mudlib_path = MUD_LIB;
 
 void init_signals(void);
 void create_object(struct object *ob);
@@ -49,10 +46,6 @@ extern int yydebug;
 #endif
 
 int port_number = PORTNO;
-#ifdef PORTNO_SEC
-int port_number_sec = PORTNO_SEC;
-#endif
-
 #ifdef CATCH_UDP_PORT
 int udp_port = CATCH_UDP_PORT;
 #endif
@@ -65,49 +58,111 @@ struct closure funcempty;
 
 double consts[5];
 
-extern struct object *vbfc_object, *master_ob;
-#ifdef USE_AUTO_OBJ
-extern struct object *auto_ob;
+extern struct object *vbfc_object;
+
+extern struct object *master_ob, *auto_ob;
+
+void
+usage(int argc, char **argv)
+{
+    fprintf(stderr, "Usage: %s -m <mudlib> -t <telnet port> -u <udp port> -p <service port>\n", argv[0]);
+    fprintf(stderr, "Additional flags:\n");
+    fprintf(stderr, " -f <flag>   Flag sent to mudlib before preloading\n");
+    fprintf(stderr, " -d <flag>   Set debug flag\n");
+    fprintf(stderr, " -D <define> Add a pre define\n"); 
+    fprintf(stderr, " -O          Warn of use of obsolete functions\n");
+    fprintf(stderr, " -e          Skip preloading\n");
+    fprintf(stderr, " -c          Additional information about file compilation\n");
+    fprintf(stderr, " -l          Unlimited eval cost\n");
+    fprintf(stderr, " -S          Enable mudstatus\n");
+    fprintf(stderr, " -y          YY debugging\n");
+    fprintf(stderr, " -N          Do not start reverse lookup daemon\n");
+    fprintf(stderr, "\n");
+    exit(1);
+}
+
+void
+parse_args(int argc, char **argv)
+{
+    int ch;
+
+    while ((ch = getopt(argc, argv, "h?m:p:t:u:f:d:D:OeclNSy")) != -1)
+    {
+        switch (ch)
+        {
+        case 'm':
+            mudlib_path = strdup(optarg);
+            break;
+        case 't':
+            port_number = atoi(optarg);
+            break;
+
+        case 'u':
+#ifdef CATCH_UDP_PORT
+            udp_port = atoi(optarg);
 #endif
+            break;
+        case 'p':
+#ifdef SERVICE_PORT            
+            service_port = atoi(optarg);
+#endif
+            break;
+        case 'f':
+            flag = strdup(optarg);
+            continue;
+        case 'e':
+            e_flag++;
+            continue;
+        case 'D':
+            add_pre_define(optarg);
+            continue;
+        case 'O':
+            warnobsoleteflag++;
+            continue;
+        case 'd':
+            d_flag = atoi(optarg);
+            continue;
+        case 'c':
+            comp_flag++;
+            continue;
+        case 'l':
+            unlimited++;
+            continue;
+        case 'N':
+            no_ip_demon++;
+            continue;
+        case 'S':
+            s_flag++;
+            mudstatus_set(1, -1, -1); /* Statistics, default limits */
+            continue;
+        case 'y':
+#ifdef YYDEBUG
+            yydebug = 1;
+#endif
+        default:
+        case '?':
+            usage(argc, argv);
+            break;
+            
+        }            
+    }    
+}
 
 int 
 main(int argc, char **argv)
 {
     extern int game_is_being_shut_down;
-    extern int current_time;
-    int i, new_mudlib = 0;
+    int i;    
     char *p;
     struct svalue *ret;
     extern struct svalue catch_value;
     extern void init_cfuns(void);
     struct gdexception exception_frame;
 
-    char *dpath;
-    struct stat c_st;
-
-#ifdef MALLOC_debugmalloc
-    extern void malloc_setup_hook();
-    malloc_setup_hook();
-#endif
-
-#ifdef MALLOC_gc
-    extern void gc_init();
-    gc_init();
-#endif
-
-#ifdef MALLOC_sysmalloc
-    extern void sysmalloc_init();
-    sysmalloc_init();
-#endif
-    
-#ifdef _SEQUENT_
-    setdtablesize(1024);
-#endif
-
-#ifndef SOLARIS
     (void)setlinebuf(stdout);
-#endif
 
+    parse_args(argc, argv);
+    
     const0.type = T_NUMBER; const0.u.number = 0;
     const1.type = T_NUMBER; const1.u.number = 1;
     constempty.type = T_FUNCTION; constempty.u.func = &funcempty;
@@ -117,9 +172,6 @@ main(int argc, char **argv)
     /*
      * Check that the definition of EXTRACT_UCHAR() is correct.
      */
-#ifdef __INSIGHT__
-    i = 0;
-#endif
     p = (char *)&i;
     *p = -10;
     if (EXTRACT_UCHAR(p) != 0x100 - 10)
@@ -128,23 +180,27 @@ main(int argc, char **argv)
 	exit(1);
     }
     set_current_time();
+#ifdef PROFILE_LPC
+    set_profile_timebase(60.0); /* One minute */
+#endif
+
 #ifdef DRAND48
     srand48((long)current_time);
 #else
 #ifdef RANDOM
     srandom(current_time);
 #else
-    (void)fprintf(stderr, "No random generator specified!\n");
+#error No random generator specified!\n
 #endif /* RANDOM */
 #endif /* DRAND48 */
 
 #if RESERVED_SIZE > 0
     reserved_area = malloc(RESERVED_SIZE);
 #endif
-    for (i=0; i < sizeof consts / sizeof consts[0]; i++)
-	consts[i] = exp(- i / 900.0);
+    init_tasks();
+    query_load_av();
     init_num_args();
-    reset_machine(1);
+    init_machine();
     init_cfuns();
 
     /*
@@ -152,79 +208,10 @@ main(int argc, char **argv)
      */
     init_signals();
 
-#ifdef BINARIES
-    /*
-     * Find the modification time of the driver. For reasons of binary
-     * integrity we only accept compiled binaries younger than the
-     * driver. This is not foolproof, we might start an old version, but
-     * this will normally work fine.
-     */
-    dpath = (char *) xalloc(strlen(argv[0]) + 1);
-    (void)strcpy(dpath, argv[0]);
-    if (stat(dpath, &c_st) != -1)
-	driver_mtime = (int)c_st.st_mtime;
-    else
-    {	
-	(void)fprintf(stderr,"Can't find myself %s, ignoring old binaries.\n",
-		dpath);
-	driver_mtime = current_time;
-    }
-    free(dpath);
-#endif
-
-    /*
-     * The flags are parsed twice !
-     * The first time, we only search for the -m flag, which specifies
-     * another mudlib, and the D-flags, so that they will be available
-     * when compiling master.c.
-     */
-    for (i = 1; i < argc; i++)
-    {
-	if (atoi(argv[i]))
-	    port_number = atoi(argv[i]);
-	else if (argv[i][0] != '-')
-	    continue;
-	switch(argv[i][1])
-	{
-	case 'D':
-	    if (argv[i][2]) { /* Amylaar : allow flags to be passed down to
-				 the LPC preprocessor */
-		struct lpc_predef_s *tmp;
-		
-		tmp = (struct lpc_predef_s *)
-		    xalloc(sizeof(struct lpc_predef_s));
-		if (!tmp)
-		    fatal("xalloc failed\n");
-		tmp->flag = string_copy(argv[i]+2);
-		tmp->next = lpc_predefs;
-		lpc_predefs = tmp;
-		continue;
-	    }
-	    (void)fprintf(stderr, "Illegal flag syntax: %s\n", argv[i]);
-	    exit(1);
-	    /* NOTREACHED */
-	case 'N':
-	    no_ip_demon++; continue;
-	case 'm':
-	    if (chdir(argv[i]+2) == -1)
-	    {
-	        (void)fprintf(stderr, "Bad mudlib directory: %s\n", argv[i]+2);
-		exit(1);
-	    }
-	    new_mudlib = 1;
-	    break;
-	}
-    }
-
-    if (!new_mudlib && chdir(MUD_LIB) == -1) {
+    if (chdir(mudlib_path) == -1) {
         (void)fprintf(stderr, "Bad mudlib directory: %s\n", MUD_LIB);
 	exit(1);
     }
-
-#ifdef USE_SWAP
-    /* Initialize swap */
-    init_swap();
-#endif
 
     if (setjmp(exception_frame.e_context))
     {
@@ -236,135 +223,71 @@ main(int argc, char **argv)
 	exception_frame.e_exception = NULL;
 	exception_frame.e_catch = 0;
 	exception = &exception_frame;
-
-#ifdef USE_AUTO_OBJ
 	auto_ob = 0;
+	master_ob = 0;
+	
 	if ((auto_ob = load_object("secure/auto", 1, 0, 0)) != NULL)
 	{
 	    add_ref(auto_ob, "main");
 	    auto_ob->prog->flags |= PRAGMA_RESIDENT;
 	}
-#endif
 
 	get_simul_efun();
 	master_ob = load_object("secure/master", 1, 0, 0);
 	if (master_ob)
 	{
-	    extern void master_ob_loaded(void);
 	    /*
 	     * Make sure master_ob is never made a dangling pointer.
 	     * Look at apply_master_ob() for more details.
 	     */
 	    add_ref(master_ob, "main");
 	    master_ob->prog->flags |= PRAGMA_RESIDENT;
-	    master_ob_loaded();
+            resolve_master_fkntab();
 	    create_object(master_ob);
+            load_parse_information();
 	    clear_state();
 	}
     }
     exception = NULL;
-#ifdef USE_AUTO_OBJ
     if (auto_ob == 0) 
     {
 	(void)fprintf(stderr, "The file secure/auto must be loadable.\n");
 	exit(1);
     }
-#endif
     if (master_ob == 0) 
     {
 	(void)fprintf(stderr, "The file secure/master must be loadable.\n");
 	exit(1);
     }
     set_inc_list(apply_master_ob(M_DEFINE_INCLUDE_DIRS, 0));
+    
     {
 	struct svalue* ret1;
 
 	ret1 = apply_master_ob(M_PREDEF_DEFINES, 0);
-	if (ret1 && ret1->type == T_ARRAY)
+	if (ret1 && ret1->type == T_POINTER)
 	{
 	    int ii;
-	    struct lpc_predef_s *tmp;
 
 	    for (ii = 0; ii < ret1->u.vec->size; ii++)
 		if (ret1->u.vec->item[ii].type == T_STRING)
 		{
-		    tmp = (struct lpc_predef_s *)
-			xalloc(sizeof(struct lpc_predef_s));
-		    tmp->flag = string_copy(ret1->u.vec->item[ii].u.string);
-		    tmp->next = lpc_predefs;
-		    lpc_predefs = tmp;
+                    add_pre_define(ret1->u.vec->item[ii].u.string);
 		}
 	}
     }
-    for (i = 1; i < argc; i++)
+
+    if (flag != NULL)
     {
-	if (atoi(argv[i]))
-	    ;
-	else if (argv[i][0] != '-')
-	{
-	    (void)fprintf(stderr, "Bad argument %s\n", argv[i]);
-	    exit(1);
-	}
-	else 
-	{
-	    /*
-	     * Look at flags. -m has already been tested.
-	     */
-	    switch(argv[i][1])
-	    {
-	    case 'f':
-		push_string(argv[i]+2, STRING_MSTRING);
-		(void)apply_master_ob(M_FLAG, 1);
-		if (game_is_being_shut_down)
-		{
-		    (void)fprintf(stderr, "Shutdown by master object.\n");
-		    exit(0);
-		}
-		continue;
-	    case 'e':
-		e_flag++; continue;
-	    case 'O':
-		warnobsoleteflag++; continue;
-	    case 'D':
-		continue;
-	    case 'N':
-		continue;
-	    case 'm':
-		continue;
-	    case 'd':
-		d_flag = atoi(argv[i] + 2);
-		continue;
-	    case 'c':
-		comp_flag++; continue;
-	    case 'l':
-		unlimited++;
-		continue;
-	    case 't':
-		t_flag++; continue;
-	    case 'S':
-		s_flag++; 
-		mudstatus_set(1, -1, -1); /* Statistics, default limits */
-		continue;
-	    case 'u':
-#ifdef CATCH_UDP_PORT
-		udp_port = atoi (&argv[i][2]);
-#endif
-		continue;
-	    case 'p':
-#ifdef SERVICE_PORT
-		service_port = atoi (&argv[i][2]);
-#endif
-		continue;
-	    case 'y':
-#ifdef YYDEBUG
-		yydebug = 1;
-#endif
-		continue;
-	    default:
-		(void)fprintf(stderr, "Unknown flag: %s\n", argv[i]);
-		exit(1);
-	    }
-	}
+        printf("Applying driver flag: %s\n", flag);
+        push_string(flag, STRING_MSTRING);
+        (void)apply_master_ob(M_FLAG, 1);
+
+        if (game_is_being_shut_down)
+        {
+            (void)fprintf(stderr, "Shutdown by master object.\n");
+            exit(0);
+        }
     }
 
     /*
@@ -397,13 +320,11 @@ main(int argc, char **argv)
     if (game_is_being_shut_down)
 	exit(1);
 
-    if (!t_flag)
-	init_call_out();
-
+    init_call_out();
     preload_objects(e_flag);
     (void)apply_master_ob(M_FINAL_BOOT, 0);
     
-    backend();
+    mainloop();
 
     return 0;
 }
@@ -430,14 +351,10 @@ debug_message(char *fmt, ...)
     char name[100];
 
     if (fp == NULL) {
-#ifdef _SEQUENT_
-	(void)strcpy(deb, "log/debug.log");
-#else
 	(void)gethostname(name,sizeof name);
 	if ((f = strchr(name, '.')) != NULL)
 	    *f = '\0';
 	(void)sprintf(deb,"%s.debug.log",name);
-#endif
 	fp = fopen(deb, "w");
 	if (fp == NULL) {
 	    perror(deb);
@@ -463,7 +380,10 @@ debug_message_svalue(struct svalue *v)
     switch(v->type)
     {
     case T_NUMBER:
-	debug_message("%d", v->u.number);
+	debug_message("%lld", v->u.number);
+	return;
+    case T_FLOAT:
+	debug_message("%.18g", v->u.real);
 	return;
     case T_STRING:
 	debug_message("\"%s\"", v->u.string);
@@ -483,12 +403,9 @@ debug_message_svalue(struct svalue *v)
 
 int slow_shut_down_to_do = 0;
 
-#ifndef MALLOC_dmalloc
 #ifdef malloc
 #undef malloc
 #endif
-
-/*#define MALLOCSIZE*/
 
 void *
 xalloc(unsigned int size)
@@ -500,33 +417,7 @@ xalloc(unsigned int size)
 	exit(3);
     if (size == 0)
 	size = 1;
-#ifdef MALLOCSIZE
-    {
-#define MSMAX 1000
-	static int msize[MSMAX];
-	static int mbig;
-	static int mcnt;
-
-	if (size > MSMAX) mbig++;
-	else msize[size]++;
-	if (++mcnt % 50000 == 0) {
-	    int i; 
-	    (void)fprintf(stderr, "Malloc stats (%d):\n", mcnt);
-	    for(i = 0; i<MSMAX; i++)
-		if (msize[i])
-		    (void)fprintf(stderr, "%4d %5d\n", i, msize[i]);
-	    (void)fprintf(stderr, ">%d %d\n", i, mbig);
-	}
-    }
-#endif
     p = (char *)malloc(size);
-#if 0
-    {
-	int i;
-	for(i = 0; i < size; i++)
-	    p[i] = 0x55;
-    }
-#endif
     if (p == 0)
     {
 	if (reserved_area)
@@ -546,4 +437,3 @@ xalloc(unsigned int size)
     }
     return p;
 }
-#endif

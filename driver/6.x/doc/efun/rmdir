@@ -2,7 +2,7 @@ NAME
 	rmdir - remove an empty directory
 
 SYNOPSIS
-	int rmdir(string pathname)
+	void rmdir(string pathname)
 
 DESCRIPTION
 	Removes an empty directory. Returns 1 on success, otherwise 0.

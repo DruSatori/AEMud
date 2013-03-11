@@ -39,8 +39,7 @@ is used as the number.
 
 Modifiers:
    n    specifys the field size, if prepended with a zero then the pad
-        string is set to "0". NOTE: padding a negative number with zeros
-        looks ugly.
+        string is set to "0".
   "."n  specifies the presision, for simple (not columns or tables)
         strings specifies the truncation length.
   ":"n  n specifies the fs _and_ the presision, if n is prepended by a zero
@@ -51,8 +50,6 @@ Modifiers:
         NOTE:  to include "'" in the pad string, you must use "\\'"
         (as the backslash has to be escaped past the interpreter),
         similarly, to include "\" requires "\\\\".
-  ","   adds commas at every third column in the numerical fields d/i/o/x,
-        so one million in "%,d" yields "1,000,000".
   " "   pad positive integers with a space.
   "+"   pad positive integers with a plus sign.
   "-"   left adjusted within field size.
@@ -60,6 +57,9 @@ Modifiers:
             unnatural in the context of a mainly string based language
             but has been retained for "compatability" ;)
   "|"   centered within field size.
+  ","   When applied to "d", "i", "o" or "x" fields, adds commas
+	at every third column in the numerical field.  E.g. one million
+	in decimal "%,d" would be formatted as "1,000,000".
   "="   column mode.  Ignored unless the argument type specifier is s.
         Field size must be specified, if presision is specified then it
         specifies the width for the string to be wordwrapped in, if not

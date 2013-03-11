@@ -1,13 +1,13 @@
 NAME
-        query_interactive - check whether a player is interactive.
+	query_interactive - determine if an object is interactive or not
 
 SYNOPSIS
-        int query_interactive(object player)
+	int query_interactive(object|int obj)
 
 DESCRIPTION
-        Checks whether a player is interactive or not. When a player is not
-        interactive, it is usually an NPC. When the object is interactive,
-        it returns true (1) otherwise false (0).
+	This function returns 1 if the specified object `ob' is an
+	interactive player and 0 otherwise.
 
 SEE ALSO
-        query_ip_name, query_ip_number
+	interactive, this_interactive, this_player
+

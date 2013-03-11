@@ -36,14 +36,10 @@
 #include <unistd.h>
 #include <sys/types.h>
 #include <sys/socket.h>
-#ifdef SOLARIS
-#include <sys/sockio.h>
-#endif
 #include <sys/ioctl.h>
 #include <netinet/in.h>
-#if !defined(FNDELAY) && defined(O_NDELAY)
-#define        FNDELAY O_NDELAY
-#endif
+#include <netinet/tcp.h>
+
 #include "config.h"
 #include "simulate.h"
 #include "lint.h"
@@ -59,27 +55,21 @@
 void
 enable_nbio(int fd)
 {
-#if defined(M_UNIX) || defined(NeXT) || defined(_AIX)
+   if (fcntl(fd, F_SETFL, O_NONBLOCK) == -1)
+      fatal("enable_nbio: fcntl(F_SETFL, O_NONBLOCK) errno = %d.\n",
+          errno);
+}
 
-    int nb = 1;
+/*
+ * Enable keep-alive on a socket.
+ */
+void
+enable_keepalive(int s)
+{
+    int keepalive = 1;
 
-    if (ioctl(fd, FIONBIO, &nb) == -1)
-    {
-	fatal("enable_nbio: ioctl(FIONBIO) errno = %d.\n",
-	    errno);
-    }
-
-#else /* M_UNIX */
-
-    if (fcntl(fd, F_SETOWN, getpid()) == -1)
-	fatal("enable_nbio: fcntl(F_SETOWN) errno = %d.\n",
-	    errno);
-
-    if (fcntl(fd, F_SETFL, FNDELAY) == -1)
-	fatal("enable_nbio: fcntl(F_SETFL, FNDELAY) errno = %d.\n",
-	    errno);
-
-#endif /* M_UNIX */
+    if (setsockopt(s, SOL_SOCKET, SO_KEEPALIVE, (char *)&keepalive, sizeof (keepalive)) == -1)
+	fatal("enable_keepalive: setsockopt() errno = %d.\n", errno);
 }
 
 /*
@@ -107,6 +97,19 @@ enable_oobinline(int s)
 }
 
 /*
+ * Enable v6only on ipv6 sockets.
+ */
+void
+enable_v6only(int s)
+{
+    int on = 1;
+
+    if (setsockopt(s, IPPROTO_IPV6, IPV6_V6ONLY, (char *)&on, sizeof (on)) == -1)
+        fatal("enable_v6only: setsockopt() errno = %d.\n", errno);
+}
+
+
+/*
  * Enable Low-Delay IP Type-of-service.
  */
 void
@@ -115,9 +118,25 @@ enable_lowdelay(int s)
 #if defined(IPPROTO_IP) && defined(IP_TOS)
     int tos = IPTOS_LOWDELAY;
 
-    if (setsockopt(s, IPPROTO_IP, IP_TOS, (char *)&tos, sizeof (tos)) == -1)
-	fatal("enable_lowdelay: setsockopt() errno = %d.\n", errno);
+    setsockopt(s, IPPROTO_IP, IP_TOS, (char *)&tos, sizeof (tos));
+// This seems to be causing crashes regularly. If this property isn't set,
+// then the socket will use its default anyway. In my humble opinion, this
+// should not crash the mud so regularly. Outcommented until a proper fix
+// can be installed. Mercade.
+//    if (setsockopt(s, IPPROTO_IP, IP_TOS, (char *)&tos, sizeof (tos)) == -1)
+//	fatal("enable_lowdelay: setsockopt() errno = %d.\n", errno);
 #endif
+}
+
+/*
+ * Enable TCP_NODELAY / Disable Nagle
+ */
+void
+enable_nodelay(int s)
+{
+    int nodelay = 1;
+    if (setsockopt(s, IPPROTO_TCP, TCP_NODELAY, (char *)&nodelay, sizeof (nodelay)) == -1)
+        fatal("enable_nodelay: setsockopt() errno = %d.\n", errno);
 }
 
 /*

@@ -1,5 +1,12 @@
 This is a brief description of how to install the CD driver:
 
+To use the driver you will need.
+
+gcc 		3.3
+gnu libc 	2.3
+make		3.80
+bison		1.875
+
 Make a directory 'mud', which contains directories named 'src', 'bin' and
 'lib'. Move the game driver source (this code) to the src directory.
 

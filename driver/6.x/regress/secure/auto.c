@@ -23,7 +23,7 @@ type_name(mixed etwas)
 	return "string";
     else if (objectp(etwas))
 	return "object";
-    else if (arrayp(etwas))
+    else if (pointerp(etwas))
 	return "array";
     else if (mappingp(etwas))
 	return "mapping";
@@ -48,12 +48,12 @@ dump_array(mixed a, string tab)
 
     if (!tab)
 	tab = "";
-    if (!arrayp(a) && !mappingp(a))
+    if (!pointerp(a) && !mappingp(a))
     {
 	dump_elem(a, tab);
 	return;
     }
-    else if (arrayp(a))
+    else if (pointerp(a))
     {
 	write("(Array)\n");
 	m = sizeof(a);
@@ -84,7 +84,7 @@ dump_mapping(mapping m, string tab)
     if (!tab)
 	tab = "";
 
-    d = m_indices(m);
+    d = m_indexes(m);
     s = sizeof(d);
     write("(Mapping) ([\n");
     for(i = 0; i < s; i++) {
@@ -100,7 +100,7 @@ dump_mapping(mapping m, string tab)
 	if (objectp(d[i]))
 	    dval = file_name(d[i]);
 
-	if (arrayp(d[i]))
+	if (pointerp(d[i]))
 	    dval = "(array:" + sizeof(d[i]) + ")";
 
 	if (mappingp(d[i]))
@@ -125,7 +125,7 @@ dump_mapping(mapping m, string tab)
 	if (objectp(m[d[i]]))
 	    val = file_name(m[d[i]]);
 
-	if (arrayp(m[d[i]]))
+	if (pointerp(m[d[i]]))
 	    val = "(array:" + sizeof(m[d[i]]) + ")";
 
 	if (mappingp(m[d[i]]))
@@ -133,10 +133,10 @@ dump_mapping(mapping m, string tab)
 
 	write(tab + dval + ":" + val + "\n");
 
-	if (arrayp(d[i]))
+	if (pointerp(d[i]))
 	    dump_array(d[i]);
 
-	if (arrayp(m[d[i]]))
+	if (pointerp(m[d[i]]))
 	    dump_array(m[d[i]]);
 
 	if (mappingp(d[i]))
@@ -151,7 +151,7 @@ dump_mapping(mapping m, string tab)
 static nomask void
 dump_elem(mixed sak, string tab)
 {
-    if (arrayp(sak))
+    if (pointerp(sak))
     {
 	dump_array(sak, tab + "   ");
     }

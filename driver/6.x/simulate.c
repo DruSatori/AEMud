@@ -8,15 +8,9 @@
 #include <memory.h>
 #include <stdarg.h>
 #include <stdlib.h>
-#if defined(sun) || defined(__osf__)
-#include <alloca.h>
-#endif
-#if defined(M_UNIX) || defined(_SEQUENT_) || defined(SOLARIS) || \
-    defined(__OpenBSD__) || defined(__NetBSD__) || defined(__FreeBSD__)
+#include <time.h>
 #include <dirent.h>
-#else
-#include <sys/dir.h>
-#endif
+#include <unistd.h>
 
 #include "config.h"
 #include "lint.h"
@@ -30,35 +24,24 @@
 #include "comm.h"
 #include "mudstat.h"
 #include "incralloc.h"
-#include "swap.h"
 #include "call_out.h"
 #include "main.h"
 #include "comm1.h"
 #include "simulate.h"
+#include "backend.h"
+
 #ifdef DEALLOCATE_MEMORY_AT_SHUTDOWN
 #include "lex.h"
 #endif
 
 #include "inline_svalue.h"
 
-extern int errno;
 extern int comp_flag;
 
 char *inherit_file;
 
-#if !defined(NeXT) && !defined(linux)
-extern int lstat (const char *, struct stat *);
-#else
-#define lstat stat
-#endif
-#ifndef linux
-#ifdef VAX_BSD
-typedef int mode_t;
-#endif
-extern int fchmod (int, mode_t);
-#endif
 char *last_verb, *trig_verb;
-extern int current_time, tot_alloc_dest_object, tot_removed_object;
+extern int tot_alloc_dest_object, tot_removed_object;
 
 extern int set_call (struct object *, struct sentence *, int),
     legal_path (char *);
@@ -80,16 +63,18 @@ void start_new_file (FILE *);
 
 extern int d_flag, s_flag;
 
-struct object *obj_list, *obj_list_destruct, *master_ob; 
-#ifdef USE_AUTO_OBJ
-struct object *auto_ob;
-#endif
+struct object *obj_list, *obj_list_destruct, *master_ob, *auto_ob;
 
 struct object *current_object;      /* The object interpreting a function. */
 struct object *command_giver;       /* Where the current command came from. */
 struct object *current_interactive; /* The user who caused this execution */
 
 int num_parse_error;		/* Number of errors in the parser. */
+
+int total_num_prog_blocks = 0;
+int total_prog_block_size = 0;
+int total_program_size = 0;
+int tot_alloc_variable_size = 0;
 
 void shutdowngame(void);
 
@@ -112,9 +97,6 @@ find_status(struct program *prog, char *str, int not_type)
         return -1;
     if (sub_name == (char *)2)
     {
-#ifdef USE_SWAP
-	access_program(prog);
-#endif
 	for (i = 0; i < (int)prog->num_variables; i++)
 	{
 	    if (prog->variable_names[i].name == real_name &&
@@ -174,11 +156,6 @@ swap_objects(struct object *ob1, struct object *ob2)
     struct program  *tmp_prog;
     struct svalue *tmp_var;
     
-#ifdef USE_SWAP
-    remove_ob_from_swap(ob1);
-    remove_ob_from_swap(ob2);
-#endif
-    
     /* swap the objects */
     call_out_swap_objects(ob1, ob2);
     stack_swap_objects(ob1, ob2);
@@ -212,9 +189,6 @@ swap_objects(struct object *ob1, struct object *ob2)
  * 
  */
 char *current_loaded_file = 0;
-#ifdef BINARIES
-extern void save_binary(struct program *);
-#endif
 
 struct object *
 load_object(char *lname, int dont_reset, struct object *old_ob, int depth)
@@ -228,18 +202,7 @@ load_object(char *lname, int dont_reset, struct object *old_ob, int depth)
     struct stat c_st;
     int name_length;
     char real_name[200], name[200];
-#ifdef USE_SWAP
-    extern struct object *swap_ob;
-#endif
     char new_ob_name[200];
-#ifdef BINARIES
-    extern int pragma_save_binary;
-    int errbin = 1;
-    int file_mtime;
-    char *binname;
-    FILE *binfile;
-#endif
-
     /* Truncate possible .c in the object name. */
     /* Remove leading '/' if any. */
     while(lname[0] == '/')
@@ -250,13 +213,9 @@ load_object(char *lname, int dont_reset, struct object *old_ob, int depth)
     if (name_length > sizeof name - 4)
 	name_length = sizeof name - 4;
     name[name_length] = '\0';
-    while (name_length >= 2 && name[name_length-2] == '.' && name[name_length-1] == 'c') {
+    while (name[name_length-2] == '.' && name[name_length-1] == 'c') {
 	name[name_length-2] = '\0';
 	name_length -= 2;
-    }
-    if (name_length == 0) {
-	fprintf(stderr, "Null object name after stripping off suffix(es) of %s\n", lname);
-	error("Invalid object name.\n");
     }
     if (old_ob)
     {
@@ -274,112 +233,80 @@ load_object(char *lname, int dont_reset, struct object *old_ob, int depth)
     /*
      * First check that the c-file exists.
      */
+    
     (void)strcpy(real_name, name);
     (void)strcat(real_name, ".c");
 
     if (depth > MAX_INHERIT)
     {
 	(void)fprintf(stderr, "Inherit chain too long for %s\n", real_name);
-	error("Inherit chain too long.\n");
+	error("Inherit chain too long: %s\n", real_name);
 	/* NOTREACHED */
     }
 
-#ifdef PURIFY
-    (void)memset(&c_st, '\0', sizeof(c_st));
-#endif
     if (stat(real_name, &c_st) == -1)
     {
-	(void)fprintf(stderr, "Could not load descr for %s\n", real_name);
-	error("Failed to load file.\n");
+	(void)fprintf(stderr, "File not found: %s\n", real_name);
+	error("File not found: %s\n", real_name);
 	/* NOTREACHED */
     }
-
     /*
      * Check if it is a legal name.
      */
     if (!legal_path(real_name))
     {
 	(void)fprintf(stderr, "Illegal pathname: %s\n", real_name);
-	error("Illegal path name.\n");
+	error("Illegal path name: %s\n", real_name);
 	/* NOTREACHED */
     }
-
-#ifdef BINARIES
-    file_mtime = (int)c_st.st_mtime;
-    binname = (char *)xalloc(strlen(BINARIES) + 
-			     strlen(real_name) + 1);
-    (void)sprintf(binname, "%s%s", BINARIES, real_name);
-    
-    errbin = 1;
-    if (stat(binname, &c_st) != -1)
-	if ((file_mtime < c_st.st_mtime))
-	    if ((binfile = fopen(binname, "r")) != NULL)
-	    {
-		errbin = load_binary(binfile, real_name);
-		
-		if (!errbin && !inherit_file)
-		{
-		    if (comp_flag) 
-			(void)fprintf(stderr,"    %s loaded from binary: %s\n",
-				real_name, binname);
-		}
-	    }
-    free(binname);
-    pragma_save_binary = 0;
-    if (errbin) {
-#endif /* BINARIES */
+    if (comp_flag)
+	(void)fprintf(stderr, " compiling %s ...", real_name);
+    f = fopen(real_name, "r");
+    if (s_flag)
+    {
+	num_fileread++;
+	num_compile++;
+    }
 	
-	if (comp_flag)
-	    (void)fprintf(stderr, " compiling %s ...", real_name);
-	f = fopen(real_name, "r");
-	if (s_flag)
-	{
-	    num_fileread++;
-	    num_compile++;
-	}
-	
-	if (f == 0)
-	{
-	    perror(real_name);
-	    error("Could not read the file.\n");
+    if (f == 0)
+    {
+	perror(real_name);
+	error("Could not read the file: %s\n", real_name);
+	/* NOTREACHED */
+    }
+    init_smart_log();
+    start_new_file(f);
+    current_file = string_copy(real_name);	/* This one is freed below */
+    current_loaded_file = real_name;
+    compile_file();
+    end_new_file();
+    current_loaded_file = 0;
+    if (comp_flag)
+    {
+	if (inherit_file == 0)
+	    (void)fprintf(stderr, " done\n");
+	else
+	    (void)fprintf(stderr, " suspended, compiling inherited file(s)\n");
+    }
+    update_compile_av(total_lines);
+    total_lines = 0;
+    (void)fclose(f);
+    free(current_file);
+    current_file = 0;
+    dump_smart_log();
+    /* Sorry, can not handle objects without programs yet. */
+    if (inherit_file == 0 && (num_parse_error > 0 || prog == 0))
+    {
+	if (prog)
+	    free_prog(prog);
+	if (num_parse_error == 0 && prog == 0) {
+	    error("No program in object !\n");
 	    /* NOTREACHED */
 	}
-	init_smart_log();
-	start_new_file(f);
-	current_file = string_copy(real_name);	/* This one is freed below */
-	current_loaded_file = real_name;
-	compile_file();
-	end_new_file();
-	current_loaded_file = 0;
-	if (comp_flag)
-	{
-	    if (inherit_file == 0)
-		(void)fprintf(stderr, " done\n");
-	    else
-		(void)fprintf(stderr, " suspended, compiling inherited file(s)\n");
-	}
-	update_compile_av(total_lines);
-	total_lines = 0;
-	(void)fclose(f);
-	free(current_file);
-	current_file = 0;
-	dump_smart_log();
-	/* Sorry, can not handle objects without programs yet. */
-	if (inherit_file == 0 && (num_parse_error > 0 || prog == 0))
-	{
-	    if (prog)
-		free_prog(prog);
-	    if (num_parse_error == 0 && prog == 0) {
-		error("No program in object !\n");
-		/* NOTREACHED */
-	    }
-	    if (!old_ob)
-	    	error("Error in loading object\n");
-	    return 0;
-	}
-#ifdef BINARIES
+	if (!old_ob)
+	    error("Error in loading object\n");
+	return 0;
     }
-#endif
 
     /*
      * This is an iterative process. If this object wants to inherit an
@@ -390,33 +317,27 @@ load_object(char *lname, int dont_reset, struct object *old_ob, int depth)
     if (inherit_file)
     {
 	char *tmp = inherit_file;
-	int len = strlen(inherit_file);
-	char *t1 = tmp;
 
 	if (prog)
 	{
 	    free_prog(prog);
 	    prog = 0;
 	}
-	while (*t1=='/') {
-	    t1++;
-	    len--;
-	}
-	while (len >= 2 && t1[len-2] == '.' && t1[len-1] == 'c') {
-	    t1[len-2] = '\0';
-	    len -= 2;
-	}
+        {
+	    char *t1 = tmp, *t2 = tmp + strlen(tmp);
+	    while (*t1=='/') 
+		t1++;
+	    if (t2-t1 > 1) 
+		if (*(--t2)=='c') 
+		    if (*(--t2)=='.') 
+			*t2='\000';
 
-	if (len == 0) {
-	    inherit_file = NULL;
-	    error("Invalid file name included.\n");
-	    /* NOTREACHED */
-	}
-
-	if (strcmp(t1, name) == 0) {
-	    inherit_file = NULL;
-	    error("Illegal to inherit self.\n");
-	    /* NOTREACHED */
+	    if (strcmp(t1, name) == 0)
+	    {
+		inherit_file = NULL;
+		error("Illegal to inherit self.\n");
+		/* NOTREACHED */
+	    }
 	}
 	/* Extreme ugliness begins. inherit_file must be 0 when we call
 	   load_object, but tmp is used as a parameter, so we can not free
@@ -424,7 +345,7 @@ load_object(char *lname, int dont_reset, struct object *old_ob, int depth)
 	*/
 	inherit_file = NULL;
 
-	(void)load_object(t1, 1, 0, depth + 1);
+	(void)load_object(tmp, 1, 0, depth + 1);
 	free(tmp);
 
 	/* Extreme ugliness ends */
@@ -442,36 +363,6 @@ load_object(char *lname, int dont_reset, struct object *old_ob, int depth)
 	(void)strcat(ob->name, "#0");
     }
     ob->prog = prog;
-#ifdef BINARIES
-    if (pragma_save_binary)
-    {
-	save_binary(ob->prog);
-	pragma_save_binary = 0;
-    }
-#endif /* BINARIES */
-#ifdef USE_SWAP
-    swap_lineno(ob->prog);
-#endif
-
-    if (obj_list)
-    {
-	ob->next_all = obj_list;
-	ob->prev_all = obj_list->prev_all;
-
-	obj_list->prev_all->next_all = ob;
-	obj_list->prev_all = ob;
-	obj_list = ob;
-    }
-    else
-#ifdef USE_SWAP
-	swap_ob =
-#endif
-	obj_list = ob->next_all = ob->prev_all = ob;
-    
-#ifdef USE_SWAP
-    if (current_object)
-	access_object(current_object);
-#endif
 
     /*	
 	add name to fast object lookup table 
@@ -499,6 +390,7 @@ load_object(char *lname, int dont_reset, struct object *old_ob, int depth)
 	We ought to add a flag here marking the object as unfinished
 	so it can be removed if the following code causes an LPC error
      */
+
     if (master_ob)
     {
 	int save_resident;
@@ -516,14 +408,11 @@ load_object(char *lname, int dont_reset, struct object *old_ob, int depth)
     
     if (ob->flags & O_DESTRUCTED)
 	return 0;
-#ifdef DO_CLEANUP
-    ob->flags |= O_WILL_CLEAN_UP;
-#endif
-
     command_giver = save_command_giver;
     if (d_flag & DEBUG_LOAD && ob)
 	debug_message("--%s loaded\n", ob->name);
 
+    
     if (master_ob && (ob->prog->flags & PRAGMA_RESIDENT))
     {
 	struct svalue *ret;
@@ -533,6 +422,7 @@ load_object(char *lname, int dont_reset, struct object *old_ob, int depth)
 	    ob->prog->flags &= ~PRAGMA_RESIDENT;
     }
 	
+    
     return ob;
 }
 
@@ -557,9 +447,6 @@ clone_object(char *str1)
 {
     struct object *ob, *new_ob;
     struct object *save_command_giver = command_giver;
-#ifdef USE_SWAP
-    extern struct object *swap_ob;
-#endif
 
     ob = find_object_no_create(str1);
     if (ob == 0 || ob->super || (ob->flags & O_CLONE) || ob->prog->flags & PRAGMA_NO_CLONE) {
@@ -575,25 +462,11 @@ clone_object(char *str1)
     new_ob->flags |= O_CLONE;
     new_ob->prog = ob->prog;
     reference_prog (ob->prog, "clone_object");
+    enter_object_hash(new_ob);	/* Add name to fast object lookup table */
     if (!current_object)
 	fatal("clone_object() from no current_object !\n");
     
     
-    if (obj_list)
-    {
-	new_ob->next_all = obj_list;
-	new_ob->prev_all = obj_list->prev_all;
-	obj_list->prev_all->next_all = new_ob;
-	obj_list->prev_all = new_ob;
-	obj_list = new_ob;
-    }
-    else
-#ifdef USE_SWAP
-	swap_ob =
-#endif
-	obj_list = new_ob->next_all = new_ob->prev_all = new_ob;
-
-    enter_object_hash(new_ob);	/* Add name to fast object lookup table */
     {
 	int num_var, i;
 	extern int tot_alloc_variable_size;
@@ -709,7 +582,7 @@ object_present(struct svalue *v, struct svalue *where)
 	}
 	else
 	    return object_present2(v->u.string, where->u.ob->contains);
-    case T_ARRAY:
+    case T_POINTER:
 	if (v->type == T_OBJECT) 
 	{
 	    for (i = 0 ; i < where->u.vec->size ; i++)
@@ -792,9 +665,6 @@ void
 destruct_object(struct object *ob)
 {
     struct gdexception exception_frame;
-#ifdef USE_SWAP
-    extern struct object *swap_ob;
-#endif
     extern struct object *vbfc_object;
     struct svalue *ret;
     struct object *sob, **pp;
@@ -808,13 +678,9 @@ destruct_object(struct object *ob)
      * it must be reloadable.
      */
     if ( (!(ob->flags & O_CLONE) && (ob->prog->flags & PRAGMA_RESIDENT)) ||
-#ifdef USE_AUTO_OBJ
-	ob == auto_ob || 
-#endif
-	ob == master_ob || ob == simul_efun_ob)
+	ob == auto_ob || ob == master_ob || ob == simul_efun_ob)
     {
 	struct object *new_ob;
-
 	new_ob = load_object(ob->name, 1, ob, 0);
 	if (!new_ob) {
 	    error("Can not compile the new %s, aborting destruction of the old.\n", ob->prog->name);
@@ -823,22 +689,31 @@ destruct_object(struct object *ob)
 
 	/* Make sure that the master object and the simul_efun object
 	 * stays loaded */
-	if (ob == master_ob || 
-#ifdef USE_AUTO_OBJ
-	    ob == auto_ob ||
-#endif
+	if (ob == master_ob || ob == auto_ob ||
 	    ob == simul_efun_ob)
 	    ob->prog->flags |= PRAGMA_RESIDENT;
 
 	swap_objects(ob, new_ob);
 	if (ob == master_ob)
 	{
-	    extern void master_ob_loaded(void);
-
-	    master_ob_loaded();
+            resolve_master_fkntab();
 	}
+
+        /* Keep a reference that will be freed in the event
+           of an exception */
+        push_object(new_ob);
+        push_object(ob);
 	if (new_ob && new_ob->flags & O_CREATED)
 	    recreate_object(ob, new_ob);
+        if (ob == master_ob) {
+            load_parse_information();
+        }
+        pop_stack(); /* ob */
+        if (new_ob->flags & O_DESTRUCTED) {
+            pop_stack(); /* new_ob */
+            return;
+        }
+        pop_stack(); /* new_ob */
 	ob = new_ob;
 	ob->prog->flags &= ~PRAGMA_RESIDENT;
     }
@@ -898,7 +773,9 @@ destruct_object(struct object *ob)
     if (d_flag & DEBUG_DESTRUCT)
 	debug_message("Destruct object %s (ref %d)\n", ob->name, ob->ref);
 
-    /* There is nowhere to move the objects. */
+    /*
+     * There is nowhere to move the objects.
+     */
     {
 	struct svalue svp;
 	svp.type = T_OBJECT;
@@ -910,6 +787,7 @@ destruct_object(struct object *ob)
 	     * stage.
 	     */
 	    (void)apply_master_ob(M_DESTRUCT_ENVIRONMENT_OF,1);
+	    if (ob->flags & O_DESTRUCTED) return;
 	    if (svp.u.ob == ob->contains)
 		destruct_object(ob->contains);
 	    if (ob->flags & O_DESTRUCTED) return;
@@ -924,6 +802,7 @@ destruct_object(struct object *ob)
 	if (ob->interactive->ed_buffer)
 	{
 	    extern void save_ed_buffer(void);
+
 	    save_ed_buffer();
 	}
 	command_giver=save;
@@ -950,7 +829,7 @@ destruct_object(struct object *ob)
     }
 
     exception_frame.e_exception = NULL;
-    exception_frame.e_catch = 0;
+    exception_frame.e_catch = 1;
 
     /* Call destructors */
     if (ob->flags & O_CREATED)
@@ -975,16 +854,19 @@ destruct_object(struct object *ob)
 		    i = si;
 		    ob = sob;
 		    push_pop_error_context(-1);
+		    exception = exception_frame.e_exception;
 		}
 		else
 		{
 		    i = si;
 		    ob = sob;
+		    exception_frame.e_exception = exception;
 		    exception = &exception_frame;
 		    call_function(ob, i,
 				  (unsigned int)ob->prog->inherit[i].prog->dtor_index, 0);
-		    pop_stack();
-		    push_pop_error_context(0);
+		    push_pop_error_context(-1);
+		    exception = exception_frame.e_exception;
+
 		    if (ob->flags & O_DESTRUCTED)
 			return;
 		}
@@ -999,25 +881,9 @@ destruct_object(struct object *ob)
      * halt execution.
      */
 
-#ifdef USE_SWAP
-    if (ob == swap_ob)
-	swap_ob = ob->prev_all;
-#endif
-    if (ob == obj_list)
-	obj_list = ob->next_all;
-    
-    ob->prev_all->next_all = ob->next_all;
-    ob->next_all->prev_all = ob->prev_all;
-    if (ob->next_all == ob)
-    {
-#ifdef USE_SWAP
-	swap_ob = 0;
-#endif
-	obj_list = 0;
-    }
-
-    delete_all_calls(ob);
     remove_object_hash(ob);
+    remove_task(ob->callout_task);
+    delete_all_calls(ob);
     if (ob->living_name)
 	remove_living_name(ob);
     ob->super = 0;
@@ -1042,7 +908,6 @@ destruct_object(struct object *ob)
 	}
     }
 }
-
 /*
  * This one is called when no program is executing from the main loop.
  */
@@ -1059,10 +924,6 @@ destruct2(struct object *ob)
     if (ob->interactive)
 	remove_interactive(ob->interactive, 0);
 
-#ifdef USE_SWAP
-    remove_ob_from_swap(ob);
-#endif
-    
     /*
      * We must deallocate variables here, not in 'free_object()'.
      * That is because one of the local variables may point to this object,
@@ -1171,38 +1032,6 @@ pstrcmp(const void *p1, const void *p2)
 		  ((const struct svalue *) p2)->u.string);
 }
 
-int
-parrcmp(const void *p1, const void *p2)
-{
-    return strcmp(((const struct svalue *) p1)->u.vec->item[0].u.string,
-		  ((const struct svalue *) p2)->u.vec->item[0].u.string);
-}
-
-void 
-encode_stat(struct svalue *vp, int flags, char *str, struct stat *st)
-{
-    if (flags == -1)
-    {
-	struct vector *v = allocate_array(3);
-
-	v->item[0].type = T_STRING;
-	v->item[0].string_type = STRING_MSTRING;
-	v->item[0].u.string = make_mstring(str);
-	v->item[1].type = T_NUMBER;
-	v->item[1].u.number = ((st->st_mode & S_IFDIR) ? -2 : st->st_size);
-	v->item[2].type = T_NUMBER;
-	v->item[2].u.number = st->st_mtime;
-	vp->type = T_ARRAY;
-	vp->u.vec = v;
-    } 
-    else 
-    {
-	vp->type = T_STRING;
-	vp->string_type = STRING_MSTRING;
-	vp->u.string = make_mstring(str);
-    }
-}
-
 /*
  * List files in directory. This function do same as standard list_files did,
  * but instead writing files right away to player this returns an array
@@ -1217,31 +1046,20 @@ encode_stat(struct svalue *vp, int flags, char *str, struct stat *st)
  *
  *   - file_list("/");, file_list("."); and file_list("/."); return contents
  *     of directory "/"
- *
- * With second argument equal to non-zero, instead of returning an array
- * of strings, the function will return an array of arrays about files.
- * The information in each array is supplied in the order:
- *    name of file,
- *    size of file (-2 means file doesn't exist).
- *    last update of file,
  */
 struct vector *
-get_dir(char *path, int flags)
+get_dir(char *path)
 {
     struct vector *v;
     size_t count = 0;
     int i;
     DIR *dirp;
     int namelen, do_match = 0;
-#if defined(_AIX) || defined(M_UNIX) || defined(__osf__) || defined(_SEQUENT_) || \
-    defined(SOLARIS) || defined(__NetBSD__) || defined(__FreeBSD__) || \
-    defined(__OpenBSD__)
     struct dirent *de;
-#else
-    struct direct *de;
-#endif
     struct stat st;
-    char *endtemp, *temppath, *p, *regexp = 0;
+    char *temppath;
+    char *p;
+    char *regexp = 0;
 
     if (!path)
 	return 0;
@@ -1256,7 +1074,7 @@ get_dir(char *path, int flags)
      * writeable copy.
      * The path "" needs 2 bytes to store ".\0".
      */
-    temppath = (char *)alloca(strlen(path) + 2);
+    temppath = (char *) alloca(strlen(path) + 2);
     if (strlen(path)<2) {
 	temppath[0] = path[0] ? path[0] : '.';
 	temppath[1] = '\000';
@@ -1295,7 +1113,9 @@ get_dir(char *path, int flags)
 	if (*p == '/' && *(p + 1) != '\0')
 	    p++;
 	v = allocate_array(1);
-	encode_stat(&v->item[0], flags, p, &st);
+	v->item[0].type = T_STRING;
+	v->item[0].string_type = STRING_MSTRING;
+	v->item[0].u.string = make_mstring(p);
 	return v;
     }
 
@@ -1307,11 +1127,7 @@ get_dir(char *path, int flags)
      */
     for (de = readdir(dirp); de; de = readdir(dirp))
     {
-#if defined(M_UNIX) || defined(_SEQUENT_) || defined(SOLARIS) || defined(linux)
 	namelen = strlen(de->d_name);
-#else
-	namelen = de->d_namlen;
-#endif
 	if (!do_match && (strcmp(de->d_name, ".") == 0 ||
 			  strcmp(de->d_name, "..") == 0))
 	    continue;
@@ -1334,34 +1150,21 @@ get_dir(char *path, int flags)
     rewinddir(dirp);
     for(i = 0, de = readdir(dirp); i < count; de = readdir(dirp))
     {
-#if defined(M_UNIX) || defined(_SEQUENT_) || defined(SOLARIS) || defined(linux)
         namelen = strlen(de->d_name);
-#else
-	namelen = de->d_namlen;
-#endif
 	if (!do_match && (strcmp(de->d_name, ".") == 0 ||
 			  strcmp(de->d_name, "..") == 0))
 	    continue;
 	if (do_match && !match_string(regexp, de->d_name))
 	    continue;
 	de->d_name[namelen] = '\0';
-	if (flags == -1)
-	{
-	    /* We'll have to .... sigh.... stat() the file to
-	     * get some add'tl info.  */
-	    endtemp = (char *)alloca(strlen(temppath) + namelen + 3);
-	    strcpy(endtemp, temppath);
-	    strcat(endtemp, "/");
-	    strcat(endtemp, de->d_name);
-	    stat(endtemp, &st);
-	}
-	encode_stat(&v->item[i], flags, de->d_name, &st);
+	v->item[i].type = T_STRING;
+	v->item[i].string_type = STRING_MSTRING;
+	v->item[i].u.string = make_mstring(de->d_name);
 	i++;
     }
     (void)closedir(dirp);
     /* Sort the names. */
-    qsort((char *)v->item, count, sizeof v->item[0],
-	(flags == -1) ? parrcmp : pstrcmp);
+    qsort((char *)v->item, count, sizeof v->item[0], pstrcmp);
     return v;
 }
 
@@ -1377,31 +1180,24 @@ tail(char *path)
 
     if (path == 0)
         return 0;
-
     f = fopen(path, "r");
     if (s_flag)
 	num_fileread++;
 
     if (f == 0)
 	return 0;
-
     if (fstat(fileno(f), &st) == -1)
 	fatal("Could not stat an open file.\n");
-
     offset = st.st_size - 54 * 20;
     if (offset < 0)
 	offset = 0;
-
-    if (fseek(f, (long)offset, 0) == -1)
+    if (fseek(f, (long) offset, 0) == -1)
 	fatal("Could not seek.\n");
-
     /* Throw away the first incomplete line. */
     if (offset > 0)
-	(void)fgets(buff, sizeof buff, f);
-
+	(void) fgets(buff, sizeof buff, f);
     while(fgets(buff, sizeof buff, f))
 	(void)add_message("%s", buff);
-
     (void)fclose(f);
     return 1;
 }
@@ -1423,6 +1219,7 @@ remove_file(char *path)
  * The object may selfdestruct, which is the only case when 0 will be
  * returned.
  */
+
 struct object *
 find_object(char *str)
 {
@@ -1441,8 +1238,8 @@ find_object(char *str)
 }
 
 /* same as find_object, but don't call 'create()' if not loaded */
-struct object *
-find_object_no_create(char *str)
+struct object *find_object_no_create(str)
+    char *str;
 {
     struct object *ob;
 
@@ -1462,23 +1259,22 @@ find_object_no_create(char *str)
 struct object *
 find_object2(char *str)
 {
-    struct object *ob;
-    int len, len2;
+    register struct object *ob;
+    register int length;
 
     /* Remove leading '/' if any. */
     while(str[0] == '/')
 	str++;
     /* Truncate possible .c in the object name. */
-    len = len2 = strlen(str);
-    while (str[len2-2] == '.' && str[len2-1] == 'c')
-	len2 -= 2;
-    if (len != len2) {
+    length = strlen(str);
+    while (str[length-2] == '.' && str[length-1] == 'c') {
 	/* A new writreable copy of the name is needed. */
-	char *p = alloca(len2 + 2);
-
-	(void)strncpy(p, str, len2);
+	char *p;
+	p = (char *)alloca(strlen(str)+1);
+	(void)strcpy(p, str);
 	str = p;
-	str[len2] = '\0';
+	str[length-2] = '\0';
+	length -= 2;
     }
     if ( (ob = lookup_object_hash(str)) != NULL ) {
 	return ob;
@@ -1504,7 +1300,9 @@ apply_command(char *com)
 	if (ret->type == T_STRING)
 	    (void)add_message("%s\n", ret->u.string);
 	if (ret->type == T_NUMBER)
-	    (void)add_message("%d\n", ret->u.number);
+	    (void)add_message("%lld\n", ret->u.number);
+	if (ret->type == T_FLOAT)
+	    (void)add_message("%.18Lg\n", ret->u.real);
     }
     else
 	(void)add_message("Error apply_command: function %s not found.\n", com);
@@ -1539,22 +1337,20 @@ update_actions(struct object *aob)
 	if (item->super->flags & O_ENABLE_COMMANDS)
 	    remove_sent(item, item->super);
 
-	for (pp = item->super->contains; pp;)
+	for (pp = item->super->contains; pp; pp = pp->next_inv)
 	{
 	    if (pp != item && (pp->flags & O_ENABLE_COMMANDS))
 		remove_sent(item, pp);
-	    pp = item->next_inv;
 	}
     }
 
     /*
      * Remove actions from objects inside the object. (children)
      */
-    for (pp = item->contains; pp;)
+    for (pp = item->contains; pp; pp = pp->next_inv)
     {
 	if (pp->flags & O_ENABLE_COMMANDS)
 	    remove_sent(item, pp);
-	pp = item->next_inv;
     }
 
     /*
@@ -2082,9 +1878,6 @@ add_action(struct closure *func, struct svalue *cmd, int flag)
     if (current_object->flags & O_DESTRUCTED)
 	return;
     ob = current_object;
-    /* This works, but actions are not removed when shadow is destructed. */
-    while(ob->shadowing)
-	ob = ob->shadowing;
     if (command_giver == 0 || (command_giver->flags & O_DESTRUCTED))
 	return;
     if (ob != command_giver && ob->super != command_giver &&
@@ -2116,65 +1909,32 @@ add_action(struct closure *func, struct svalue *cmd, int flag)
     command_giver->sent = p;
 }
 
-int
-remove_action(char *verb)
-{
-    struct object *ob;
-    struct sentence **s;
-
-    if (command_giver)
-        ob = command_giver;
-    else
-        ob = current_object;
-
-    if (ob) {
-        for (s = &ob->sent; *s; s = &((*s)->next)) {
-            struct sentence *tmp;
-
-            if (((*s)->funct->funobj == current_object)
-                && !strcmp((*s)->verb, verb)) {
-                tmp = *s;
-                *s = tmp->next;
-                free_sentence(tmp);
-                return 1;
-            }
-        }
-    }
-    return 0;
-}
-
 /*
  * Remove all commands (sentences) defined by object 'ob' in object
  * 'player'
  */
-void
+void 
 remove_sent(struct object *ob, struct object *player)
 {
     struct sentence **s;
 
     for (s= &player->sent; *s;)
     {
-        struct sentence *tmp;
-        if ((*s)->funct->funobj == ob) {
-            if (d_flag & DEBUG_SENTENCE)
-                debug_message("--Unlinking sentence %s\n",
-		    getclosurename((*s)->funct));
-            tmp = *s;
-            *s = tmp->next;
-            free_sentence(tmp);
-        } else
-            s = &((*s)->next);
+	struct sentence *tmp;
+	if ((*s)->funct->funobj == ob) {
+	    if (d_flag & DEBUG_SENTENCE)
+		debug_message("--Unlinking sentence %s\n", getclosurename((*s)->funct));
+	    tmp = *s;
+	    *s = tmp->next;
+	    free_sentence(tmp);
+	} else
+	    s = &((*s)->next);
     }
-
+    
 }
 
+
 static char debinf[8192];
-#ifdef USE_SWAP
-int swap_out_obj_sec, swap_out_obj_min, swap_out_obj_hour;
-int swap_out_prog_sec, swap_out_prog_min, swap_out_prog_hour;
-int swap_in_obj_sec, swap_in_obj_min, swap_in_obj_hour;
-int swap_in_prog_sec, swap_in_prog_min, swap_in_prog_hour;
-#endif
 
 char *
 get_gamedriver_info(char *str)
@@ -2187,52 +1947,19 @@ get_gamedriver_info(char *str)
     extern int tot_alloc_object, tot_alloc_object_size,
 	num_arrays, total_array_size, num_mappings,
 	total_mapping_size;
-    extern int total_num_prog_blocks, total_prog_block_size;
     extern int num_distinct_strings_shared, num_distinct_strings_malloced;
     extern long bytes_distinct_strings_shared, bytes_distinct_strings_malloced;
     extern long overhead_bytes_shared, overhead_bytes_malloced;
     extern int num_call, call_out_size;
-    extern int globcache_tries, globcache_hits, funmap_tries;
+    extern unsigned long long globcache_tries, globcache_hits;
     extern struct vector null_vector;
-    extern int cache_tries, cache_hits;
-    extern int total_program_size;
-    extern int tot_alloc_variable_size;
+    extern unsigned long long cache_tries, cache_hits;
     extern int num_closures, total_closure_size;
-#ifdef USE_SWAP
-    extern int num_swapped_arrays, size_swapped_arrays;
-    extern int num_swapped_closures, size_swapped_closures;
-    extern int num_swapped_mappings, size_swapped_mappings;
-    extern int num_strings_swapped, size_strings_swapped;
-    extern int obj_swapped, obj_bytes_swapped;
-    extern int program_bytes_swapped;
-    extern int programs_swapped;
-    extern u_int swap_cursize, swap_minfree, swap_maxfree;
-    extern int total_bytes_swapped;
-    extern int total_swap_chains;
-    extern int total_free_blocks;
-    extern int last_address;
-    extern int used_memory;
-    extern struct program *swap_prog;
-    extern struct object *swap_ob;
-#ifdef DO_CLEANUP
-    extern int total_clean_ups;
-    extern int clean_up_return0;
-    extern int clean_up_return1;
-    extern int clean_up_destruct;
-#endif
-#endif
     
-#ifdef COMM_STAT
-    extern int add_message_calls,inet_packets,inet_volume;
-#endif
     (void)strcpy(debinf,"");
 
     if (strcmp(str, "status") == 0 || strcmp(str, "status tables") == 0)
     {
-
-#ifdef COMM_STAT
-	extern int add_message_calls,inet_packets,inet_volume;
-#endif
 
 	if (strcmp(str, "status tables") == 0)
 	    verbose = 1;
@@ -2240,122 +1967,78 @@ get_gamedriver_info(char *str)
 	    res = RESERVED_SIZE;
 	else
 	    res = 0;
-#ifdef COMM_STAT
-
-	if (verbose)
-	{
-	    (void)sprintf(tmp,"Calls to add_message: %d   Packets: %d   Average packet size: %f\n\n",add_message_calls,inet_packets,(float)inet_volume/inet_packets);
-	    (void)strcat(debinf, tmp);
-	}
-#endif
 	if (!verbose)
 	{
-	    (void)sprintf(tmp,"Sentences:\t\t\t%8d %8d\n", tot_alloc_sentence,
+	    (void)sprintf(tmp,"Sentences:\t\t%12d %12d\n", tot_alloc_sentence,
 		    tot_alloc_sentence * (int) sizeof (struct sentence));
 	    (void)strcat(debinf, tmp);
 
-	    (void)sprintf(tmp,"Objects:\t\t\t%8d %8d (%d dest, %d rmd)\n",
+	    (void)sprintf(tmp,"Objects:\t\t%12d %12d (%d dest, %d rmd)\n",
 		    tot_alloc_object, tot_alloc_object_size,
 		    tot_alloc_dest_object, tot_removed_object);
 	    (void)strcat(debinf, tmp);
 
-#ifdef USE_SWAP
-	    (void)sprintf(tmp,"Variables:\t\t\t\t %8d (%d swapped, %d Kbytes)\n",
-		    tot_alloc_variable_size,
-		    obj_swapped, (unsigned int)obj_bytes_swapped / 1024);
-#else
-	    (void)sprintf(tmp,"Variables:\t\t\t\t %8d\n",
+	    (void)sprintf(tmp,"Variables:\t\t\t     %12d\n",
 		    tot_alloc_variable_size);
-#endif
 	    (void)strcat(debinf, tmp);
 
-#ifdef USE_SWAP
-	    (void)sprintf(tmp,"Arrays:\t\t\t\t%8d %8d (%d swapped, %d Kbytes)\n",
-		    num_arrays,	total_array_size,
-		    num_swapped_arrays, size_swapped_arrays / 1024);
-#else
-	    (void)sprintf(tmp,"Arrays:\t\t\t\t%8d %8d\n",
+	    (void)sprintf(tmp,"Arrays:\t\t\t%12d %12d\n",
 		    num_arrays,	total_array_size);
-#endif
 	    (void)strcat(debinf, tmp);
 
-	    (void)sprintf(tmp,"Call_outs:\t\t\t%8d %8d\n", num_call,
+	    (void)sprintf(tmp,"Call_outs:\t\t%12d %12d\n", num_call,
 			call_out_size);
 	    (void)strcat(debinf, tmp);
 
-#ifdef USE_SWAP
-	    (void)sprintf(tmp,"Mappings:\t\t\t%8d %8d (%d swapped, %d Kbytes)\n",
-		    num_mappings, total_mapping_size,
-		    num_swapped_mappings, size_swapped_mappings / 1024);
-#else
-	    (void)sprintf(tmp,"Mappings:\t\t\t%8d %8d\n",
+	    (void)sprintf(tmp,"Mappings:\t\t%12d %12d\n",
 		    num_mappings, total_mapping_size);
-#endif
 	    (void)strcat(debinf, tmp);
 
-#ifdef USE_SWAP
-	    (void)sprintf(tmp,"Functions:\t\t\t%8d %8d (%d swapped, %d Kbytes)\n",
-		    num_closures, total_closure_size,
-		    num_swapped_closures, size_swapped_closures / 1024);
-#else
-	    (void)sprintf(tmp,"Functions:\t\t\t%8d %8d\n",
+	    (void)sprintf(tmp,"Functions:\t\t%12d %12d\n",
 		    num_closures, total_closure_size);
-#endif
 	    (void)strcat(debinf, tmp);
 
-	    (void)sprintf(tmp,"Strings:\t\t\t%8d %8ld (%ld overhead)\n",
+	    (void)sprintf(tmp,"Strings:\t\t%12d %12ld (%ld overhead)\n",
 		    num_distinct_strings_shared + num_distinct_strings_malloced,
 		    bytes_distinct_strings_shared + bytes_distinct_strings_malloced,
 		    overhead_bytes_shared + overhead_bytes_malloced);
 	    (void)strcat(debinf, tmp);
-#ifdef USE_SWAP
-	    (void)sprintf(tmp,"\t\t\t\t\t\t  (%d swapped, %u Kbytes)\n",
-		    num_strings_swapped, (unsigned)size_strings_swapped >> 10);
-	    (void)strcat(debinf, tmp);
-#endif
 	    
-	    (void)sprintf(tmp,"Prog blocks:\t\t\t%8d %8d\n",
+	    (void)sprintf(tmp,"Prog blocks:\t\t%12d %12d\n",
 		    total_num_prog_blocks, total_prog_block_size);
 	    (void)strcat(debinf, tmp);
 
-#ifdef USE_SWAP
-	    (void)sprintf(tmp,"Programs:\t\t\t\t %8d (%d swapped, %d Kbytes)\n",
-		    total_program_size, programs_swapped, program_bytes_swapped / 1024);
-#else
-	    (void)sprintf(tmp,"Programs:\t\t\t\t %8d\n", total_program_size);
-#endif
+	    (void)sprintf(tmp,"Programs:\t\t\t     %12d\n", total_program_size);
 	    (void)strcat(debinf, tmp);
 
-	    (void)sprintf(tmp,"Memory reserved:\t\t\t %8d\n", res);
+	    (void)sprintf(tmp,"Memory reserved:\t\t     %12d\n", res);
 	    (void)strcat(debinf, tmp);
 	
 	}
 	if (verbose)
 	{
 #ifdef CACHE_STATS
-	    extern int call_cache_saves;
-	    extern int global_cache_saves;
-	    extern int searches_needed;
-	    extern int searches_done;
-	    extern int global_first_saves;
-	    extern int call_first_saves;
+	    extern long long call_cache_saves;
+	    extern long long global_cache_saves;
+	    extern long long searches_needed;
+	    extern long long searches_done;
+	    extern long long global_first_saves;
+	    extern long long call_first_saves;
 #endif
 
 	    if (globcache_tries < 1)
 		globcache_tries = 1;
-	    if (funmap_tries < 1)
-		funmap_tries = 1;
 	    (void)strcat(debinf, stat_living_objects());
 	    (void)strcat(debinf, "\nFunction calls:\n--------------------------\n");
-	    proc = 100.0 * ((cache_hits * 1.0) / cache_tries);
-	    (void)sprintf(tmp,"Call cache,   Tries: %10d Hits: %10d Miss: %10d Rate: %3.1f%%\n",
+	    proc = 100.0 * (((double)cache_hits * 1.0) / cache_tries);
+	    (void)sprintf(tmp,"Call cache,   Tries: %10lld Hits: %10lld Miss: %10Ld Rate: %3.2f%%\n",
 		    cache_tries, cache_hits,
 		    cache_tries - cache_hits, proc);
 	    (void)strcat(debinf, tmp);
 #ifdef CACHE_STATS
-	    (void)sprintf(tmp, "searches saved       %10d %3d%%\n",
+	    (void)sprintf(tmp, "searches saved       %10lld %3.2f%%\n",
 		    call_first_saves,
-		    (int)(100.0 * ((call_first_saves * 1.0) /
+		    (double)(100.0 * (((double)call_first_saves * 1.0) /
 				   (searches_needed +
 				    global_first_saves
 				    + call_first_saves))));
@@ -2363,15 +2046,15 @@ get_gamedriver_info(char *str)
 #endif	    
 	    
 #ifdef GLOBAL_CACHE
-	    proc = 100.0 * ((globcache_hits * 1.0) / globcache_tries);
-	    (void)sprintf(tmp,"Global cache, Tries: %10d Hits: %10d Miss: %10d Rate: %3.1f%%\n",
+	    proc = 100.0 * (((double)globcache_hits * 1.0) / globcache_tries);
+	    (void)sprintf(tmp,"Global cache, Tries: %10lld Hits: %10lld Miss: %10lld Rate: %3.2f%%\n",
 		    globcache_tries, globcache_hits,
 		    globcache_tries -globcache_hits, proc);
 	    (void)strcat(debinf, tmp);
 #ifdef CACHE_STATS
-	    (void)sprintf(tmp, "searches saved       %10d %3d%%\n",
+	    (void)sprintf(tmp, "searches saved       %10lld %3.2f%%\n",
 		    global_first_saves,
-		    (int)(100.0 * ((global_first_saves * 1.0) /
+		    (double)(100.0 * (((double)global_first_saves * 1.0) /
 				   (searches_needed +
 				    global_first_saves
 				    + call_first_saves))));
@@ -2381,64 +2064,25 @@ get_gamedriver_info(char *str)
 
 #ifdef CACHE_STATS
 	    (void)strcat(debinf, "Secondary hits:\n");
-	    (void)sprintf(tmp,"searches needed    : %10d\n", searches_needed);
+	    (void)sprintf(tmp,"searches needed    : %10lld\n", searches_needed);
 	    (void)strcat(debinf, tmp);
-	    (void)sprintf(tmp,"call cache saves   : %10d %3d%%\n",
-		    call_cache_saves, (int)(100.0 * ((call_cache_saves * 1.0) /
+	    (void)sprintf(tmp,"call cache saves   : %10lld %3.2f%%\n",
+		    call_cache_saves, (double)(100.0 * (((double)call_cache_saves * 1.0) /
 						     searches_needed)));
 	    (void)strcat(debinf, tmp);
-	    (void)sprintf(tmp,"global cache saves : %10d %3d%%\n",
+	    (void)sprintf(tmp,"global cache saves : %10lld %3.2f%%\n",
 		    global_cache_saves,
-		    (int)(100.0 * ((global_cache_saves * 1.0) /
+		    (double)(100.0 * (((double)global_cache_saves * 1.0) /
 				   searches_needed)));
 	    (void)strcat(debinf, tmp);
-	    (void)sprintf(tmp,"searches done      : %10d\n", searches_done);
+	    (void)sprintf(tmp,"searches done      : %10lld\n", searches_done);
 	    (void)strcat(debinf, tmp);
-	    (void)sprintf(tmp,"Total needed       : %10d %3d%% done\n",
+	    (void)sprintf(tmp,"Total needed       : %10lld %3.2f%% done\n",
 		    searches_needed + global_first_saves + call_first_saves,
-		    (int)(100.0 * ((searches_done * 1.0) /
+		    (double)(100.0 * (((double)searches_done * 1.0) /
 				   (searches_needed +
 				    global_first_saves
 				    + call_first_saves))));
-	    (void)strcat(debinf, tmp);
-#endif
-#ifdef USE_SWAP
-#ifdef DO_CLEANUP
-	    (void)strcat(debinf, "\nClean-ups:\n--------------------------------------\n");
-	    (void)sprintf(tmp, "Total:    %8u\n", total_clean_ups);
-	    (void)strcat(debinf, tmp);
-	    (void)sprintf(tmp, "Destruct: %8u\n", clean_up_destruct);
-	    (void)strcat(debinf, tmp);
-	    (void)sprintf(tmp, "Return 0: %8u\n", clean_up_return0);
-	    (void)strcat(debinf, tmp);
-	    (void)sprintf(tmp, "Return 1: %8u\n", clean_up_return1);
-	    (void)strcat(debinf, tmp);
-#endif
-	    (void)strcat(debinf, "\nSwap:\n--------------------------------------\n");
-	    (void)sprintf(tmp, "Swapped: %8u Kbytes in %d chains.\n",
-		    (unsigned)total_bytes_swapped >> 10, total_swap_chains);
-	    (void)strcat(debinf, tmp);
-	    (void)sprintf(tmp, "File:    %8u Kbytes.\n",
-		    (unsigned)last_address >> 10);
-	    (void)strcat(debinf, tmp);
-	    (void)sprintf(tmp, "Free:    %8u blocks.\n",
-		    (unsigned)total_free_blocks);
-	    (void)strcat(debinf, tmp);
-	    (void)sprintf(tmp, "Bitmap:  %8u Kbytes. (%u..%u)\n",
-		    swap_cursize >> 10, swap_minfree, swap_maxfree);
-	    (void)strcat(debinf, tmp);
-	    (void)sprintf(tmp, "Time:    %8d seconds.\n", current_time -
-		    (swap_prog->time_of_ref < swap_ob->time_of_ref ?
-		     swap_prog->time_of_ref :
-		     swap_prog->time_of_ref));
-	    (void)strcat(debinf, tmp);
-	    (void)sprintf(tmp,"Objects:   %d/%d/%d in, %d/%d/%d out.\n",
-		    swap_in_obj_sec, swap_in_obj_min, swap_in_obj_hour,
-		    swap_out_obj_sec, swap_out_obj_min, swap_out_obj_hour);
-	    (void)strcat(debinf, tmp);
-	    (void)sprintf(tmp,"Programs:  %d/%d/%d in, %d/%d/%d out.\n",
-		    swap_in_prog_sec, swap_in_prog_min, swap_in_prog_hour,
-		    swap_out_prog_sec, swap_out_prog_min, swap_out_prog_hour);
 	    (void)strcat(debinf, tmp);
 #endif
 	    add_string_status(debinf);
@@ -2463,14 +2107,6 @@ get_gamedriver_info(char *str)
 
 	if (!verbose) 
 	{
-#ifdef USE_SWAP
-	    if (used_memory)
-	    {
-		(void)sprintf(tmp,"Other:\t\t\t\t\t %8ld\n", (long)used_memory - tot);
-		(void)strcat(debinf, tmp);
-		tot = (long)used_memory;
-	    }
-#endif
 	    (void)strcat(debinf, "\t\t\t\t\t --------\n");
 	    (void)sprintf(tmp,"Total:\t\t\t\t\t %8ld\n", tot);
 	    (void)strcat(debinf, tmp);
@@ -2495,7 +2131,7 @@ get_local_commands(struct object *ob)
 /* XXX */
     for (num = 0, s = ob->sent; s; s = s->next, num++)
     {
-	ret2->item[num].type = T_ARRAY;
+	ret2->item[num].type = T_POINTER;
 	ret2->item[num].u.vec = ret = allocate_array(4);
 
 	ret->item[0].type = T_STRING;
@@ -2516,6 +2152,18 @@ get_local_commands(struct object *ob)
 	ret->item[3].u.string = make_mstring(getclosurename(s->funct));
     }
     return ret2;
+}
+
+/*VARARGS1*/
+void
+warning(char *format, ...)
+{
+    va_list  argptr;
+
+    va_start(argptr, format);
+    vfprintf(stderr, format, argptr);
+    va_end(argptr);
+    (void)fflush(stderr);
 }
 
 /*VARARGS1*/
@@ -2571,13 +2219,13 @@ throw_error()
 {
     extern struct svalue catch_value;
 
-    if (exception->e_catch)
+    if (exception && exception->e_catch)
     {
 	longjmp(exception->e_context, 1);
 	fatal("Throw_error failed!\n");
     }
     if (catch_value.type == T_STRING)
-	error(catch_value.u.string);
+	error("%s", catch_value.u.string);
     else
 	error("Throw with no catch.\n");
     /* NOTREACHED */
@@ -2589,6 +2237,7 @@ static char emsg_buf[2000];
 void
 error(char *fmt, ...)
 {
+    struct gdexception exception_frame;
     extern struct svalue catch_value;
     char *object_name;
 
@@ -2608,11 +2257,11 @@ error(char *fmt, ...)
    	longjmp(exception->e_context, 1);
    	fatal("Catch() longjump failed\n");
     }
-    num_error++;
-    if (num_error <= 1)
+    if (num_error == 0)
     {
-	
-	debug_message("%s", emsg_buf+1);
+        time_t now = time(NULL);
+	num_error = 1;
+	debug_message("%s%s", ctime(&now), emsg_buf+1);
 
 	object_name = dump_trace(0);
 	(void)fflush(stdout);
@@ -2630,7 +2279,7 @@ error(char *fmt, ...)
 	 * and may not be used any more. The reason is that some strings
 	 * may have been on the stack machine stack, and has been deallocated.
 	 */
-	reset_machine (0);
+	reset_machine ();
 	push_string(emsg_buf, STRING_MSTRING);
 	if (current_object)
 	{
@@ -2649,14 +2298,28 @@ error(char *fmt, ...)
 	    push_string("<?? >", STRING_CSTRING);
 	    push_string("", STRING_CSTRING);
 	}
-	(void)apply_master_ob(M_RUNTIME_ERROR, 4);
+
+	exception_frame.e_exception = exception;
+	exception_frame.e_catch = 1;
+	if (setjmp(exception_frame.e_context))
+	{
+	    debug_message("Error while calling runtime_error()\n");
+	    reset_machine();
+	}
+	else
+	{	    
+	    exception = &exception_frame;
+	    (void)apply_master_ob(M_RUNTIME_ERROR, 4);
+	}
+	num_error = 0;
+	exception = exception_frame.e_exception;
+	
     }
     else
     {
 	debug_message("Too many simultaneous errors.\n");
     }
     
-    num_error--;
     if (exception != NULL)
 	longjmp(exception->e_context, 1);
     abort();
@@ -2813,9 +2476,6 @@ shutdowngame()
 
     remove_all_players();
     ipc_remove();
-#ifdef USE_SWAP
-    unlink_swap_file();
-#endif
 #ifdef DEALLOCATE_MEMORY_AT_SHUTDOWN
     if (reserved_area) {
 	free(reserved_area);
@@ -2837,9 +2497,6 @@ shutdowngame()
     free_mstring(p);
     add_string_status(debinf + strlen(debinf));
     fputs(debinf, stderr);
-#ifdef USE_SWAP
-    close_swap_file();
-#endif
     remove_string_hash();
     clear_otable();
     clear_ip_table();
@@ -2847,30 +2504,12 @@ shutdowngame()
 	free(inherit_file);
     inherit_file = NULL;
     (void)apply(NULL, NULL, 0, 0);
-#ifndef MALLOC_sysmalloc
     fputc('\n', stderr);
     fputs(dump_malloc_data(), stderr);
-#endif
 #endif
 #ifdef OPCPROF
     opcdump();
 #endif
-}
-
-
-/*
- * Call this one when there is only little memory left.
- * We tell master object of our troubles and hope it does something
- * intelligent, like starting Armageddon.
- */
-void 
-slow_shut_down(int minutes)
-{
-    /*
-     * Swap out objects, and free some memory.
-     */
-    push_number(minutes);
-    (void) apply_master_ob(M_MEMORY_FAILURE, 1);
 }
 
 int 
@@ -2948,7 +2587,7 @@ strip_trailing_slashes(char *path)
 struct stat to_stats, from_stats;
 
 int
-copy(char *from, char *to)
+copy (char *from, char *to)
 {
     char buf[1024 * 8];
     int len;			/* Number of bytes read into buf. */
@@ -2961,7 +2600,7 @@ copy(char *from, char *to)
 	/* NOTREACHED */
     }
   
-    if (unlink(to) && errno != ENOENT)
+    if (unlink (to) && errno != ENOENT)
     {
 	error("cannot remove `%s'\n", to);
 	/* NOTREACHED */
@@ -2980,7 +2619,6 @@ copy(char *from, char *to)
 	(void)close (ifd);
 	return 1;
     }
-#ifndef FCHMOD_MISSING
     if (fchmod (ofd, (mode_t)(from_stats.st_mode & 0777)))
     {
 	error ("%s: fchmod failed\n", to);
@@ -2989,7 +2627,6 @@ copy(char *from, char *to)
 	(void)unlink (to);
 	return 1;
     }
-#endif
   
     while ((len = read (ifd, buf, sizeof (buf))) > 0)
     {
@@ -3048,7 +2685,7 @@ copy(char *from, char *to)
    Return 0 if successful, 1 if an error occurred.  */
 
 int
-do_move(char *from, char *to)
+do_move (char *from, char *to)
 {
     if (lstat (from, &from_stats) != 0)
     {
@@ -3077,15 +2714,7 @@ do_move(char *from, char *to)
 	error ("%s: unknown error\n", to);
 	return 0;
     }
-#if defined(SYSV) && !defined(_SEQUENT_)
-    if (isdir(from))
-    {
-	char cmd_buf[100];
-	(void)sprintf(cmd_buf, "/usr/lib/mv_dir %s %s", from, to);
-	return !system(cmd_buf);
-  } else
-#endif /* SYSV */      
-      if (rename (from, to) == 0)
+    if (rename (from, to) == 0)
     {
 	return 1;
     }
@@ -3156,9 +2785,9 @@ do_rename(char * fr, char *t)
 	    cp = from;
 	
 	newto = (char *) alloca (strlen (to) + 1 + strlen (cp) + 1);
-	(void)sprintf(newto, "%s/%s", to, cp);
-	return do_move(from, newto);
+	(void)sprintf (newto, "%s/%s", to, cp);
+	return do_move (from, newto);
     }
     else
-	return do_move(from, to);
+	return do_move (from, to);
 }

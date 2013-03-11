@@ -1,4 +1,3 @@
-#include <stdarg.h>
 #include <stdio.h>
 #include <string.h>
 #include <ctype.h>
@@ -24,7 +23,6 @@
 #include "inline_eqs.h"
 #include "inline_svalue.h"
 
-extern void error(char *fmt, ...);
 static void rehash_map(struct mapping *);
 
 /* rehash when the mapping is filled to this many % */
@@ -122,7 +120,7 @@ hashsvalue(struct svalue *v)
     switch(v->type) {
     case T_NUMBER:
 	return (unsigned short)v->u.number;
-    case T_ARRAY:
+    case T_POINTER:
 	return (unsigned short)((unsigned long)v->u.vec >> 4);
     case T_MAPPING:
 	return (unsigned short)((unsigned long)v->u.map >> 4);
@@ -272,6 +270,27 @@ addto_mapping(struct mapping *m1, struct mapping *m2)
     }
 }
 
+void
+remove_from_mapping(struct mapping *m, struct svalue *val)
+{
+    struct apair **p;
+    short h;
+
+    h = hashsvalue(val) & (m->size-1);
+
+    for (p = &m->pairs[h]; *p; p = &(*p)->next)
+      if (equal_svalue(val, &(*p)->arg)) {
+	struct apair *del = *p;
+	*p = del->next;
+	del->next = NULL;
+	m->card--;
+	free_apairs(del);
+	return;
+      }
+    return;
+
+}
+
 struct mapping *
 remove_mapping(struct mapping *m, struct svalue *val)
 {
@@ -303,7 +322,7 @@ rehash_map(struct mapping *map)
 {
     register struct apair **pairs, *next, *ptr;
     short i, hval;
-    short nsize;
+    unsigned int nsize;
 
     nsize = map->size * 2;
     if (nsize > MAX_MAPPING_SIZE) {

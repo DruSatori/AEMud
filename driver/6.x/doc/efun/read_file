@@ -9,7 +9,6 @@ DESCRIPTION
 	'startlin' and 'numlines' is given then the function gives the
 	textlines (separated by newlines), from the line 'startlin' to
 	'startlin' + 'numlines'.
-	The first line is called line number 1.
 
 NOTA BENE
 	There is a maximum limit to the number of bytes that can be read. This

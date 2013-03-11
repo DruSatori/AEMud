@@ -1,22 +1,19 @@
 
 #include <sys/socket.h>
-#ifdef _AIX
-#include <sys/socketvar.h>
-#endif
 #include <netinet/in.h>
 #include <arpa/inet.h>
 
-#ifdef linux
-#define	FD_SETSIZE	__FD_SETSIZE
-#endif
-
 #define MAX_WRITE_SOCKET_SIZE	8192
+
+#include "config.h"
 
 struct interactive {
     void *tp;
     struct object *ob;		/* Points to the associated object */
     struct sentence *input_to;	/* To be called with next input line ! */
-    struct sockaddr_in addr;
+    struct sockaddr_storage addr;
+    char *host_name;    
+    socklen_t addrlen;
     char *prompt;
     int closing;		/* True when closing this socket. */
     int do_close;		/* This is to be closed down. */
@@ -37,14 +34,9 @@ struct interactive {
     unsigned screen_width;   /* If 0, no wordwrap */
     unsigned current_column; /* Where the cursor should be */
 #endif
-#ifdef COLOUR_SUPPORT
-    char     default_bg;
-    char     default_fg;
-    unsigned colour_method;  /* 0 - no colour, 1 - ansi, 2 - debug */
-#endif
+
 };
 
-void add_ip_entry(unsigned long, char *);
 void remove_interactive(struct interactive *, int);
 void interactive_input(struct interactive *, char *);
-void *new_player(void *, struct sockaddr_in *, size_t);
+void *new_player(void *, struct sockaddr_storage *, socklen_t, u_short);

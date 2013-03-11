@@ -33,11 +33,8 @@
 struct mstring_hdr {
 #ifdef DEBUG
 	u_long	magic;
-#ifdef __alpha
-	u_int	pad;
 #endif
-#endif
-	u_short	length;
+	u_int	length;
 	u_short	count;
 };
 
@@ -60,7 +57,7 @@ struct mstring_hdr {
 	(((struct mstring_hdr *)((char *)(cp) - mstring_header))->count)
 
 char *allocate_mstring(size_t);
-char *make_mstring(char *);
+char *make_mstring(const char *);
 char *reference_mstring(char *);
 void free_mstring(char *);
 
@@ -70,10 +67,7 @@ struct sstring_hdr {
 #endif
 	char	*prev;
 	char	*next;
-#if defined(DEBUG)
-	u_short	pad;
-#endif
-	u_short	length;
+	u_int	length;
 	u_short	count;
 	u_short	hash;
 };
@@ -106,7 +100,7 @@ struct sstring_hdr {
 	(((struct sstring_hdr *)((char *)(cp) - sstring_header))->hash)
 
 char *reference_sstring(char *);
-char *make_sstring(char *);
+char *make_sstring(const char *);
 void free_sstring(char *);
 char *find_sstring(char *);
 

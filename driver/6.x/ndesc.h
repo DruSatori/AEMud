@@ -28,7 +28,8 @@
  * OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF
  * ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
-
+#ifndef _NDESC_H
+#define _NDESC_H
 typedef struct ndesc {
     int                 nd_fd;
     int			nd_mask;
@@ -59,3 +60,4 @@ void nd_enable(ndesc_t *, int);
 void nd_disable(ndesc_t *, int);
 void nd_select(struct timeval *);
 void nd_shutdown(void);
+#endif

@@ -1,54 +1,54 @@
-README CD.04.08-ae
+===============================================================================
+README CD.06.04
+- IPv6 support has been added to all services except udp. 
+  The UDP service is not secure and should be disabled in active muds.
+  This also requires a new version of the hname binary to be installed.
+- Bibopmalloc has been disabled as it appears Linux system malloc is alot faster
+  and not much different in memory consumption.
+- Refcounters changed to unsigned int as short could be overflowed fairly easily 
+  crashing the GD.
+- Fixed an issue where self referencing arrays would crash the GD.
 
-Added 4.07 colour code management - Durandir@ae
+===============================================================================
+README CD.06.03
+- Octal Syntax has been changed from 01111 to 0o1111.
+  The old syntax will be obsolete in a future release.
+- Using TCP_NODELAY for telnet connections.
+- Sprintf Efun can now print 65535 bytes.
+- Allow negative indexes to arrays to reference from the end. arr[-1] == arr[sizeof(arr) - 1]
 
-Modified sprintf to skip colour codes - Durandir@ae
+===============================================================================
+README CD.06.02
+- Compiles and runs on on GCC 4.4
+- Fixed numerous buffer overflows
+- 'Could not load descr' is now 'File not found'
+- Add MD5 support for crypt()
 
-Fixed minor bug in efun:sscanf, introduced with skip handling ( <= instead of
-< in argument counting) -- Durandir@ae
+===============================================================================
+README CD.06.01
+- Strip .c from inherit names
+- Fixed a crash when a connection is closed right away.
+- Adds query_living_name
 
-==============================================================================
-README CD.04.08
+===============================================================================
+README CD.06.00
+?
 
-- The following changes were made by Lucius@S&V
+===============================================================================
+README CD.05.00
+Increaed precision of float to double.
 
-Allow efun::get_dir to take an optional second argument that will
-provide additional file information (size & modified time)
+Increased int from 32 bits to 64 bits.
 
-Added efun::printf, this works exactly as write(sprintf()) would.
+Added foreach statement to simplify looping over arrays and mappings.
 
-Cleaned up efun::ed a bit to provide better error reporting.
-Also enabled the whole-file regexp searching.
+Allow declaration on variables anywhere you can have a statement.
 
-Added NO_ANSI define check in parse_command of backend.c to allow
-for stripping of ansi characters before command processing.
+Added modulo for floats.
 
-Added skip assignment checking into efun::sscanf, used like "%*s".
+Allow delaration of vatiables in the first expression of a for statement.
 
-Added support for using efun::add_action in shadows, action will be added
-to the object at the bottom of the shadow chain.  The only problem
-with this is the actions aren't removed when shadows are unlinked.
-
-Added efun::remove_action to allow for the removal of an action,
-mainly added to complement the shadow support mentioned above.
-
-Changed T_POINTER -> T_ARRAY.
-Also changed efun::pointerp -> efun::arrayp.
-
-Changed efun::m_indexes to efun::m_indices.
-
-Added USE_AUTO_OBJ define to enable the /secure/auto.c object.
-
-Modifed BUFF_SIZE in sprintf.c to be '20000' to reduce the overflows.
-We can afford the memory.
-
-Modified the pragma_strict_types declaration to '1' from '0' in lex.c.
-This forces all code to be compiled as if #pragma strict_types was set.
-
-Modified efun::break_string to take an optional 4th argmument.
-This argument tells the function what line to begin/stop indenting on.
-Also, modified 'width' field. 0 == use screenwidth, 1 = use default (78)
-any other value is carried forward.
+Fixed an error in the accounting of mstrings.
 
 ===============================================================================
 README CD.04.07
@@ -86,9 +86,6 @@ out by Skywise
 Make efun::break_string be consistant on first vs. rest of lines, from Mercade
 
 Allow efun::unique_array to take a closure argument; from Shiva
-
-Fix a case where giving mulitple .c postfixes in inherit statements would
-crash the driver
 ===============================================================================
 README CD.04.06
 Fixed small things that were pointed out by GCC 2.8.x

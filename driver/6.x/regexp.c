@@ -216,9 +216,6 @@ STATIC INLINE void     regc(char);
 STATIC void     reginsert(char, char *);
 STATIC void     regtail(char *, char *);
 STATIC void     regoptail(char *, char *);
-#ifdef STRCSPN
-STATIC int      strcspn(char *, char *);
-#endif
 
 /*
  - regcomp - compile a regular expression into internal code
@@ -236,7 +233,7 @@ STATIC int      strcspn(char *, char *);
  * of the structure of the compiled regexp.
  */
 regexp *
-regcomp(char *exp, int excompat)
+regcomp(char *rexp, int excompat)
 /*
 int		excompat;	 \( \) operators like in unix ex 
 */
@@ -248,11 +245,11 @@ int		excompat;	 \( \) operators like in unix ex
     int             flags;
     short	   *exp2,*dest,c;
 
-    if (exp == (char *)NULL)
+    if (rexp == (char *)NULL)
 	FAIL("NULL argument");
 
-    exp2=(short*)xalloc( (strlen(exp)+1) * (sizeof(short[8])/sizeof(char[8])) );
-    for ( scan=exp,dest=exp2; (c= *scan++); ) {
+    exp2=(short*)xalloc( (strlen(rexp)+1) * (sizeof(short[8])/sizeof(char[8])) );
+    for ( scan=rexp,dest=exp2; (c= *scan++); ) {
 	switch (c) {
 	    case '(':
 	    case ')':
@@ -810,18 +807,18 @@ static int
 regtry(regexp *prog, char *string)
 {
     register int    i;
-    register char **sp;
-    register char **ep;
+    register char **sprog;
+    register char **eprog;
 
     reginput = string;
     regstartp = prog->startp;
     regendp = prog->endp;
 
-    sp = prog->startp;
-    ep = prog->endp;
+    sprog = prog->startp;
+    eprog = prog->endp;
     for (i = NSUBEXP; i > 0; i--) {
-	*sp++ = (char *)NULL;
-	*ep++ = (char *)NULL;
+	*sprog++ = (char *)NULL;
+	*eprog++ = (char *)NULL;
     }
     if (regmatch(prog->program + 1)) {
 	prog->startp[0] = string;
@@ -1183,37 +1180,6 @@ static char
     return (buf);
 }
 #endif
-
-/*
- * The following is provided for those people who do not have strcspn() in
- * their C libraries.  They should get off their butts and do something
- * about it; at least one public-domain implementation of those (highly
- * useful) string routines has been published on Usenet.
- */
-#ifdef STRCSPN
-/*
- * strcspn - find length of initial segment of s1 consisting entirely
- * of characters not from s2
- */
-
-static int 
-strcspn(char *s1, char *s2)
-{
-    register char  *scan1;
-    register char  *scan2;
-    register int    count;
-
-    count = 0;
-    for (scan1 = s1; *scan1 != '\0'; scan1++) {
-	for (scan2 = s2; *scan2 != '\0';)	/* ++ moved down. */
-	    if (*scan1 == *scan2++)
-		return (count);
-	count++;
-    }
-    return (count);
-}
-#endif
-
 
 /*
  - regsub - perform substitutions after a regexp match

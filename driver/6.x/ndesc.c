@@ -102,6 +102,23 @@ nd_append(ndesc_t *nd)
     nd_tail = nd;
 }
 
+/* Make a network descriptor the tail of the list */
+static void
+nd_set_tail(ndesc_t *nd)
+{
+    if (nd == nd_tail)
+        return;
+
+    /* Make the list circular */
+    nd_head->nd_prev = nd_tail;
+    nd_tail->nd_next = nd_head;
+    /* Move the head/tail */
+    nd_head = nd->nd_next;
+    nd_tail = nd;
+    /* Cut the circle */
+    nd_tail->nd_next = NULL;
+    nd_head->nd_prev = NULL;
+}
 /*
  * Remove a network descriptor object from the list of attached network
  * descriptors.
@@ -196,7 +213,7 @@ nd_gc(void)
     int fd;
 
     nd_do_gc = 0;
-
+    
     if (nd_max_fd == -1)
         return;
 
@@ -276,6 +293,26 @@ nd_disable(ndesc_t *nd, int mask)
         FD_CLR(fd, &nd_xfds);
 }
 
+/* Call cleanup on one network descriptor and return true.
+ * If no descriptor needs cleanup return 0.
+ */
+static int
+nd_cleanup(void)
+{
+    ndesc_t *nd;
+    for (nd = nd_head; nd != NULL; nd = nd->nd_next)
+    {
+	if (nd->nd_mask & ND_C)
+	{
+            nd_set_tail(nd);
+	    (*nd->nd_cfunc)(nd, nd->nd_vp);
+	    if (nd_do_gc)
+		nd_gc();
+	    return 1;
+	}
+    }
+    return 0;
+}
 /*
  * Perform a select() on all network descriptors and call the read, write
  * and exception callback functions for those descriptors which select()
@@ -286,54 +323,48 @@ nd_disable(ndesc_t *nd, int mask)
 void
 nd_select(struct timeval *tvp)
 {
-    int nfds, fd, setp;
+    int nfds, fd;
     fd_set rfds, wfds, xfds;
-    ndesc_t *nd, *next;
-
+    ndesc_t *nd;
+    struct timeval tv = *tvp;
     rfds = nd_rfds;
     wfds = nd_wfds;
     xfds = nd_xfds;
 
-    nfds = select(nd_max_fd + 1, &rfds, &wfds, &xfds, tvp);
-    if (nfds == -1)
+    for (nd = nd_head; nd != NULL; nd = nd->nd_next)
+        if (nd->nd_mask & ND_C) {
+            tv.tv_sec = tv.tv_usec = 0;
+            break;
+        }
+
+    /* Nothing else to process so wait on I/O */
+    nfds = select(nd_max_fd + 1, &rfds, &wfds, &xfds, &tv);
+
+    if (nfds == -1) /* Error!!! */
         return;
 
-    for (nd = nd_head; nd != NULL; nd = next)
+    for (nd = nd_head; nd != NULL; nd = nd->nd_next)
     {
-        if (nfds == 0)
-            break;
-
-        next = nd->nd_next;
-
-	if (nd->nd_mask == 0)
-	    continue;
-
         fd = nd->nd_fd;
 
-	setp = 0;
-
         if (FD_ISSET(fd, &xfds))
-        {
 	    (*nd->nd_xfunc)(nd, nd->nd_vp);
-	    setp = 1;
-        }
 
         if (FD_ISSET(fd, &wfds))
-        {
 	    (*nd->nd_wfunc)(nd, nd->nd_vp);
-            setp = 1;
-        }
 
         if (FD_ISSET(fd, &rfds))
-        {
 	    (*nd->nd_rfunc)(nd, nd->nd_vp);
-            setp = 1;
-        }
+    }
 
-	nfds -= setp;
-
-	if (nd->nd_mask & ND_C)
+    for (nd = nd_head; nd != NULL; nd = nd->nd_next)
+    {
+        if (nd->nd_mask & ND_C)
+        {
+            nd_set_tail(nd);
 	    (*nd->nd_cfunc)(nd, nd->nd_vp);
+	    break;
+        }
     }
 
     if (nd_do_gc)
@@ -349,14 +380,19 @@ nd_shutdown(void)
     struct timeval tv;
     ndesc_t *nd, *next;
 
+    while(nd_cleanup())
+        ;
     tv.tv_sec = tv.tv_usec = 0;
     nd_select(&tv);
-
+    while(nd_cleanup())
+        ;
     for (nd = nd_head; nd != NULL; nd = next)
     {
         next = nd->nd_next;
-
+        
 	if (nd->nd_sfunc != NULL)
 	    (*nd->nd_sfunc)(nd, nd->nd_vp);
     }
+    while(nd_cleanup())
+        ;
 }

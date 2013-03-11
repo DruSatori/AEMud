@@ -37,21 +37,19 @@
 /* A quick fix that hopefully does the job! -- Buddha */
 #define PROMPT ":"
 
-int	version = 601;	/* used only in the "set" function, for i.d. */
+int	version = 6;	/* used only in the "set" function, for i.d. */
   
 #include <stdio.h>
 #include <string.h>
-#ifdef __STDC__
 #include <memory.h>
-#endif
 #include <sys/types.h>  /* need for netinet */
 #include <ctype.h>
-#include "config.h"
-#include "lint.h"
 /* Regexp is Henry Spencer's package. WARNING: regsub is modified to return
  * a pointer to the \0 after the destination string, and this program refers
  * to the "private" reganch field in the struct regexp.
  */
+#include "config.h"
+#include "lint.h"
 #include "regexp.h"
 #include "interpret.h"
 #include "object.h"
@@ -127,29 +125,13 @@ int	version = 601;	/* used only in the "set" function, for i.d. */
 #define SUB_FAIL	(ERR-4)
 #define MEM_FAIL	(ERR-5)
 #define UNSPEC_FAIL	(ERR-6)
-#define UNRECOG_COMMAND	(ERR-6)
-
-#define BAD_LINE_RANGE  (ERR-7)
-#define BAD_LINE_NUMBER (ERR-8)
-#define SYNTAX_ERROR    (ERR-9)
-#define RANGE_ILLEGAL   (ERR-10)
-#define IS_RESTRICTED   (ERR-11)
-#define LINE_OR_RANGE_ILL (ERR-12)
-#define FILE_NAME_ERROR (ERR-13)
-#define MARK_A_TO_Z     (ERR-14)
-#define SUB_BAD_PATTERN (ERR-15)
-#define SUB_BAD_REPLACEMENT (ERR-16)
-#define BAD_DESTINATION (ERR-17)
-#define END_OF_FILE     (ERR-18)
-#define SEARCH_FAILED   (ERR-19)
-#define NO_LINE_RANGE   (ERR-20)
 
 #define	BUFFER_SIZE	2048	/* stream-buffer size:  == 1 hd cluster */
 
 #define LINFREE	1	/* entry not in use */
 #define LGLOB	2       /* line marked global */
 
-#define MAXLINE	2048	/* max number of chars per line */
+#define MAXLINE	512	/* max number of chars per line */
 #define MAXPAT	256	/* max number of chars per replacement pattern */
 #define MAXFNAME 256	/* max file name size */
 
@@ -176,15 +158,15 @@ void set_prompt (char *);
 extern int toupper (int);
 #endif
 
-static int doprnt (int, int);
-static int ins (char *);
-static int deflt (int, int);
-static int doglob (void);
-static int set (void);
-static int getlst (void);
-static int getone (void);
-static int ckglob (void);
-static void set_ed_buf (void);
+int doprnt (int, int);
+int ins (char *);
+int deflt (int, int);
+int doglob (void);
+int set (void);
+int getlst (void);
+int getone (void);
+int ckglob (void);
+void set_ed_buf (void);
 void save_ed_buffer (void);
 #ifdef ED_INDENT
 static int indent_code (void);
@@ -240,8 +222,8 @@ static void free_ed_buffer (void);
 #define ALL_FLAGS_MASK	0x07f0
 
 
-static char	inlin[MAXLINE];
-static char	*inptr;		/* tty input buffer */
+char	inlin[MAXLINE];
+char	*inptr;		/* tty input buffer */
 struct ed_buffer {
 	int	diag;		/* diagnostic-output? flag */
 	int	truncflg;	/* truncate long line flag */
@@ -260,10 +242,12 @@ struct ed_buffer {
 	int	LastLn;
 	int	Line1, Line2, nlines;
 	int	flags;
+#if 0
 	int	eightbit;	/* save eighth bit */
 	int	nflg;		/* print line number flag */
 	int	lflg;		/* print line in verbose mode */
 	int	pflg;		/* print current line after each command */
+#endif
 	int	appending;
 	int     moring;         /* used for the wait line of help */
 	struct closure *exit_func; /* function to call on exit */
@@ -272,7 +256,7 @@ struct ed_buffer {
 	int	cur_autoindent;
 };
 
-static struct tbl {
+struct tbl {
 	char	*t_str;
 	int	t_and_mask;
 	int	t_or_mask;
@@ -338,7 +322,7 @@ regexp	*optpat(void);
 /*	append.c	*/
 
 
-static int 
+int 
 append(int line, int glob)
 {
     if(glob)
@@ -353,7 +337,7 @@ append(int line, int glob)
 	return 0;
 }
 
-static void
+void
 more_append(char *str)
 {
     if(str[0] == '.' && str[1] == '\0')
@@ -413,7 +397,7 @@ _count_blanks(char *str, int blanks)
 
 /*	ckglob.c	*/
 
-static int 
+int 
 ckglob()
 {
     regexp	*glbpat;
@@ -464,7 +448,8 @@ ckglob()
  *	Set P_LINE1 & P_LINE2 (the command-range delimiters) if the file is
  *	empty; Test whether they have valid values.
  */
-static int 
+
+int 
 deflt(int def1, int def2)
 {
     if(P_NLINES == 0)
@@ -483,23 +468,15 @@ deflt(int def1, int def2)
  * to me what errors might be detectable/reportable.  To silence a warning
  * message, I've added a constant return statement. -- RAM
  * ... It could check to<=P_LASTLN ... igp
- * ... Ok...and it corrects from (or to) > P_LASTLN also -- robo
  */
-static int 
+
+int 
 del(int from, int to)
 {
-    LINE *first, *last, *next, *tmp;
-
-    if (P_LASTLN == 0)
-        return (0);             /* nothing to delete */
-    if (from > P_LASTLN)
-        from = P_LASTLN;
-    if (to > P_LASTLN)
-        to = P_LASTLN;
-    if (from < 1)
-        from = 1;
-    if (to < 1)
-        to = 1;
+    LINE	*first, *last, *next, *tmp;
+    
+    if(from < 1)
+	from = 1;
     first = getprevptr( getptr( from ) );
     last = getnextptr( getptr( to ) );
     next = first->l_next;
@@ -515,7 +492,8 @@ del(int from, int to)
     return(0);
 }
 
-static int 
+
+int 
 dolst(int line1, int line2)
 {
     int oldflags = P_FLAGS, p;
@@ -527,7 +505,8 @@ dolst(int line1, int line2)
 }
 
 /*	doprnt.c	*/
-static int 
+
+int 
 doprnt(int from, int to)
 {
     from = (from < 1) ? 1 : from;
@@ -547,8 +526,7 @@ doprnt(int from, int to)
 	return(0);
 }
 
-void 
-prntln(char *str, int vflg, int len) 
+void prntln(char *str, int vflg, int len) 
 {
     char *line, start[(MAXLINE << 1) + 2]; 
 
@@ -562,11 +540,7 @@ prntln(char *str, int vflg, int len)
 	    switch (*str)
 	    {
 	    case '\t':
-//		*line++ = *str;
-  		/* have to be smart about this or the indentor will fail */
-  		*line++ = ' ';
-  		while ((line - start) % 8)
-  		    *line++ = ' ';
+		*line++ = *str;
 		break;
 	    case DEL:
 		*line++ = '^';
@@ -591,7 +565,8 @@ prntln(char *str, int vflg, int len)
 }
 
 /*	egets.c	*/
-static int 
+
+int 
 egets(char *str, int size, FILE *stream)
 {
     int	c = 0, count;
@@ -638,7 +613,8 @@ egets(char *str, int size, FILE *stream)
     return(count);
 }  /* egets */
 
-static int 
+
+int 
 doread(int lin, char *fname)
 {
     FILE	*fp;
@@ -673,7 +649,7 @@ doread(int lin, char *fname)
 	return(err);
     if (P_DIAG)
     {
-	(void)add_message("%u lines %u bytes",lines,bytes);
+	(void)add_message("%u lines %lu bytes",lines,bytes);
 	if(P_NONASCII)
 	    (void)add_message(" [%d non-ascii]",P_NONASCII);
 	if(P_NULLCHAR)
@@ -685,7 +661,8 @@ doread(int lin, char *fname)
     return( err );
 }  /* doread */
 
-static int 
+
+int 
 dowrite(int from, int to, char *fname, int apflg)
 {
     FILE	*fp;
@@ -726,17 +703,22 @@ dowrite(int from, int to, char *fname, int apflg)
 	return( err );
 }  /* dowrite */
 
+
 /*	find.c	*/
-static int
-find(regexp *pat, int dir)
+
+int find(regexp *pat, int dir)
 {
     int	i, num;
     LINE	*lin;
     
-    if (!pat) return (ERR);
-    dir ? nextCurLn() : prevCurLn();
+    if (dir)
+	nextCurLn();
+    else
+	prevCurLn();
     num = P_CURLN;
     lin = P_CURPTR;
+    if (!pat)
+	return (ERR);
     for(i = 0; i < P_LASTLN; i++ )
     {
 	if(regexec( pat, gettxtl( lin ) ))
@@ -747,14 +729,14 @@ find(regexp *pat, int dir)
 	else
 	    num = prevln(num), lin = getprevptr(lin);
     }
-    dir ? prevCurLn() : nextCurLn();
-    return ( SEARCH_FAILED );
+    return ( ERR );
 }
 
+#if 0
 /*	findg.c by Ted Gaunt for global searches....	much like 'grep' 
 	especially useful when line numbering is turned on.
 */
-static int
+int
 findg(regexp *pat, int dir)
 {
     int	i, num,count;
@@ -780,9 +762,11 @@ findg(regexp *pat, int dir)
 	return ( ERR );
     else return (count);
 }
+#endif /* 0 */
 
 /*	getfn.c	*/
-static char *
+
+char *
 getfn(int writeflg)
 {
     static char	file[MAXFNAME];
@@ -837,7 +821,8 @@ getfn(int writeflg)
     return( file );
 }  /* getfn */
 
-static int 
+
+int 
 getnum(int first)
 {
     regexp	*srchpat;
@@ -871,11 +856,14 @@ getnum(int first)
 	    inptr++;
 	return(find(srchpat,c == '/'?1:0));
 	
-    case '&':			/* for grep-like searching */
+#if 0
+    case '^':			/* for grep-like searching */
+    case '&':
 	srchpat = optpat();
 	if(*inptr == c)
 	    inptr++;
 	return(findg(srchpat, c == '^' ? 1 : 0));
+#endif
 	
     case '-':
     case '+':
@@ -884,13 +872,14 @@ getnum(int first)
     case '\'':
 	inptr++;
 	if (*inptr < 'a' || *inptr > 'z')
-	    return(MARK_A_TO_Z);
+	    return(EOF);
 	return P_MARK[ *inptr++ - 'a' ];
 	
     default:
-	return ( first ? NO_LINE_RANGE : 1 );	/* unknown address */
+	return ( first ? EOF : 1 );	/* unknown address */
     }
 }  /* getnum */
+
 
 /*  getone.c
  *	Parse a number (or arithmetic expression) off the command line.
@@ -898,7 +887,7 @@ getnum(int first)
 #define FIRST 1
 #define NOTFIRST 0
 
-static int 
+int 
 getone()
 {
     int	c, i, num;
@@ -923,18 +912,14 @@ getone()
     return ( num>P_LASTLN ? ERR : num );
 }  /* getone */
 
-static int
+int
 getlst()
 {
     int	num;
     
     P_LINE2 = 0;
-    for(P_NLINES = 0; (num = getone()) >= 0 || (num == BAD_LINE_NUMBER);)
+    for(P_NLINES = 0; (num = getone()) >= 0;)
     {
-	/* if it's out of bounds, go to the end of the file. */
-	if (num == BAD_LINE_NUMBER)
-	    num = P_LASTLN;
-
 	P_LINE1 = P_LINE2;
 	P_LINE2 = num;
 	P_NLINES++;
@@ -950,12 +935,14 @@ getlst()
     if(P_NLINES <= 1)
 	P_LINE1 = P_LINE2;
     
-//    return ( (num == ERR) ? num : P_NLINES );
-    return ((num < 0) ? num : P_NLINES);
+    return ( (num == ERR) ? num : P_NLINES );
 }  /* getlst */
 
+
 /*	getptr.c	*/
-LINE *getptr(int num)
+
+LINE *getptr(num)
+int	num;
 {
 	LINE	*ptr;
 	int	j;
@@ -972,13 +959,14 @@ LINE *getptr(int num)
 	return(ptr);
 }
 
+
 /*	getrhs.c	*/
-static int 
+
+int 
 getrhs(char *sub)
 {
     char delim = *inptr++;
     char *outmax = sub + MAXPAT;
-
     if( delim == NL || *inptr == NL)	/* check for eol */
 	return( ERR );
     while( *inptr != delim && *inptr != NL )
@@ -998,7 +986,6 @@ getrhs(char *sub)
 		*sub++ = ESCAPE;
 		*sub++ = ESCAPE;
 		inptr++;
-		break;
 #endif
 	    case 'n':
 		*sub++ = '\n';
@@ -1064,8 +1051,8 @@ getrhs(char *sub)
 }
 
 /*	ins.c	*/
-static int
-ins(char *str)
+
+int ins(char *str)
 {
     char	*cp;
     LINE	*new, *nxt;
@@ -1096,8 +1083,10 @@ ins(char *str)
 	return 1;
 }
 
+
 /*	join.c	*/
-static int 
+
+int 
 join(int first, int last)
 {
     char buf[MAXLINE];
@@ -1106,7 +1095,7 @@ join(int first, int last)
     int num, flag;
     
     if (first <= 0 || first > last || last > P_LASTLN)
-	return(BAD_LINE_RANGE);
+	return(ERR);
     if (first == last)
     {
 	setCurLn( first );
@@ -1148,14 +1137,15 @@ join(int first, int last)
  *	Unlink the block of lines from P_LINE1 to P_LINE2, and relink them
  *	after line "num".
  */
-static int
+
+int
 moveblock(int num)
 {
     int	range;
     LINE	*before, *first, *last, *after;
     
     if( P_LINE1 <= num && num <= P_LINE2 )
-	return(BAD_LINE_RANGE);
+	return( ERR );
     range = P_LINE2 - P_LINE1 + 1;
     before = getptr(prevln(P_LINE1));
     first = getptr(P_LINE1);
@@ -1176,7 +1166,8 @@ moveblock(int num)
     return 1;
 }
 
-static int
+
+int
 transfer(int num)
 {
     int mid, lin, ntrans;
@@ -1207,7 +1198,9 @@ transfer(int num)
     return(1);
 }
 
+
 /*	optpat.c	*/
+
 regexp *
 optpat()
 {
@@ -1240,7 +1233,7 @@ regerror(char *s)
 	(void)add_message("ed: %s\n", s );
 }
 
-static int 
+int 
 set()
 {
     char	word[16];
@@ -1248,7 +1241,7 @@ set()
     
     if(*(++inptr) != 't') {
 	if(*inptr != SP && *inptr != HT && *inptr != NL)
-	    return(SYNTAX_ERROR);
+	    return(ERR);
     } else
 	inptr++;
     
@@ -1313,7 +1306,7 @@ relink(LINE *a, LINE *x, LINE *y, LINE *b)
 }
 #endif
 
-static void 
+void 
 set_ed_buf()
 {
     relink(&P_LINE0, &P_LINE0, &P_LINE0, &P_LINE0);
@@ -1323,7 +1316,8 @@ set_ed_buf()
 
 
 /*	subst.c	*/
-static int
+
+int
 subst(regexp *pat, char *sub, int gflg, int pflag)
 {
     int	nchngd = 0;
@@ -1399,9 +1393,9 @@ static int shi;
 static int full_shift, small_shift;
 
 static void
-shift(register char *text)
+shift(char *text)
 {
-    register int idx;
+    int idx;
 
     /*
      * First determine the number of leading spaces
@@ -1424,7 +1418,7 @@ shift(register char *text)
 	if (idx < MAXLINE)
 	{
 	    char buffer[MAXLINE];
-	    register char *p;
+	    char *p;
 
 	    p = buffer;
 	    /*
@@ -1449,8 +1443,7 @@ shift(register char *text)
 		return;
 	    }
 	}
-	(void)add_message("Result of shift would be too long, line %d\n", 
-			  lineno);
+	(void)add_message("Result of shift would be too long, line %d\n", lineno);
 	errs++;
     }
 }
@@ -1495,10 +1488,10 @@ indent(char *buf)
     static char f[] = { 7, 1, 7, 1, 2, 1, 1, 6, 4,  2, 6, 7, 7,  2, 0, };
     static char g[] = { 2, 2, 1, 7, 1, 5, 5, 1, 3,  6, 2, 2, 2,  2, 0, };
     char text[MAXLINE], ident[MAXLINE];
-    register char *p, *isp;
-    register int *ip;
-    register long indent_index;
-    register int top, token;
+    char *p, *isp;
+    int *ip;
+    long indent_index;
+    int top, token;
     char *start;
     int do_indent;
 
@@ -1544,14 +1537,8 @@ indent(char *buf)
 		ssz = stack - stackbot;
 		isz = ind - indbot;
 		stackbot = (char *)xalloc(sizeof(char) * STACKSZ);
-#ifdef PURIFY
-		(void)memset(stackbot, '\0', sizeof(char) * STACKSZ);
-#endif
 		stack = stackbot + ssz;
 		indbot = (int *)xalloc(sizeof(int) * STACKSZ);
-#ifdef PURIFY
-		(void)memset(indbot, '\0', sizeof(int) * STACKSZ);
-#endif
 		ind = indbot + isz;
 		(void)memcpy(stack, nx->stack, (size_t)(STACKSZ - ssz));
 		(void)memcpy(ind, nx->ind, sizeof(int) * (STACKSZ - isz));
@@ -1873,7 +1860,7 @@ indent(char *buf)
 		    /*
 		     * out of stack
 		     */
-		    error("Nesting too deep in line %d\n");
+		    error("Nesting too deep in line\n");
 		}
 
 		/*
@@ -1968,7 +1955,6 @@ static void
 clean_pps_stack(void)
 {
     struct pps_stack *nx;
-
     while ((nx = pps) != NULL)
     {
 	pps = nx->last;
@@ -1986,10 +1972,6 @@ indent_code()
      */
     stackbot = (char *)xalloc(sizeof(char) * STACKSZ);
     indbot = (int *)xalloc(sizeof(int) * STACKSZ);
-#ifdef PURIFY
-    (void)memset(stackbot, '\0', sizeof(char) * STACKSZ);
-    (void)memset(indbot, '\0', sizeof(int) * STACKSZ);
-#endif
     stack = stackbot + STACKSZ - 1;
     *stack = XEOT;
     ind = indbot + STACKSZ - 1;
@@ -2019,13 +2001,14 @@ indent_code()
     clean_pps_stack();
     return 0;
 }
-#endif /* INDENT */
+#endif
 
 /*  docmd.c
  *	Perform the command specified in the input buffer, as pointed to
  *	by inptr.  Actually, this finds the command letter first.
  */
-static int 
+
+int 
 docmd(int glob)
 {
     static char	rhs[MAXPAT];
@@ -2034,7 +2017,6 @@ docmd(int glob)
     int	apflg, pflag, gflag;
     int	nchng;
     char	*fptr;
-    int st;
     
     pflag = FALSE;
     Skip_White_Space;
@@ -2043,14 +2025,7 @@ docmd(int glob)
     switch(c) {
     case NL:
 	if( P_NLINES == 0 && (P_LINE2 = nextln(P_CURLN)) == 0 )
-	    return(END_OF_FILE);
-        if (P_NLINES == 2) {
-            if (P_LINE1 > P_LINE2 || P_LINE1 <= 0)
-                return BAD_LINE_RANGE;
-            if ((st = doprnt(P_LINE1, P_LINE2)))
-                return st;
-            return 0;
-        }
+	    return(ERR);
 	setCurLn( P_LINE2 );
 	return (1);
 	
@@ -2062,30 +2037,28 @@ docmd(int glob)
     case 'a':
     case 'A':
 	P_CUR_AUTOIND = c=='a' ? P_AUTOINDFLG : !P_AUTOINDFLG;
-        if (*inptr != NL)
-	    return SYNTAX_ERROR;
-	if (P_NLINES > 1)
-	    return RANGE_ILLEGAL;
+	if(*inptr != NL || P_NLINES > 1)
+	    return(ERR);
 	
 	if ( P_CUR_AUTOIND ) count_blanks(P_LINE1);
-	if((st = append(P_LINE1, glob)) < 0)
-	    return st;
+	if(append(P_LINE1, glob) < 0)
+	    return(ERR);
 	P_FCHANGED = TRUE;
 	break;
 	
     case 'c':
 	if(*inptr != NL)
-	    return(SYNTAX_ERROR);
+	    return(ERR);
 	
 	if(deflt(P_CURLN, P_CURLN) < 0)
-	    return(BAD_LINE_RANGE);
+	    return(ERR);
 	
 	P_CUR_AUTOIND = P_AUTOINDFLG;
 	if ( P_AUTOINDFLG ) count_blanks(P_LINE1);
-	if((st = del(P_LINE1, P_LINE2)) < 0)
-	    return(st);
-	if((st = append(P_CURLN, glob)) < 0)
-	    return(st);
+	if(del(P_LINE1, P_LINE2) < 0)
+	    return(ERR);
+	if(append(P_CURLN, glob) < 0)
+	    return(ERR);
 	P_FCHANGED = TRUE;
 	break;
 	
@@ -2096,13 +2069,13 @@ docmd(int glob)
 	}
 
 	if(*inptr != NL)
-	    return(SYNTAX_ERROR);
+	    return(ERR);
 	
 	if(deflt(P_CURLN, P_CURLN) < 0)
-	    return(BAD_LINE_RANGE);
+	    return(ERR);
 	
-	if((st = del(P_LINE1, P_LINE2)) < 0)
-	    return(st);
+	if(del(P_LINE1, P_LINE2) < 0)
+	    return(ERR);
 	if(nextln(P_CURLN) != 0)
 	    nextCurLn();
 	P_FCHANGED = TRUE;
@@ -2112,19 +2085,19 @@ docmd(int glob)
 	
     case 'e':
 	if(P_NLINES > 0)
-	    return(LINE_OR_RANGE_ILL);
+	    return(ERR);
 	if(P_FCHANGED)
 	    return CHANGED;
 	/* FALLTHROUGH */
     case 'E':
 	if(P_NLINES > 0)
-	    return(LINE_OR_RANGE_ILL);
+	    return(ERR);
 	
 	if(*inptr != ' ' && *inptr != HT && *inptr != NL)
-	    return(SYNTAX_ERROR);
+	    return(ERR);
 	
 	if((fptr = getfn(0)) == NULL)
-	    return(FILE_NAME_ERROR);
+	    return(ERR);
 	
 	(void)clrbuf();
 	(void)doread(0, fptr);
@@ -2135,32 +2108,30 @@ docmd(int glob)
 	
     case 'f':
 	if(P_NLINES > 0)
-	    return(LINE_OR_RANGE_ILL);
+	    return(ERR);
 	
 	if(*inptr != ' ' && *inptr != HT && *inptr != NL)
-	    return(SYNTAX_ERROR);
+	    return(ERR);
 	
 	fptr = getfn(0);
 	
 	if (P_NOFNAME)
 	    (void)add_message("%s\n", P_FNAME);
 	else {
-	    if(fptr == NULL) return(FILE_NAME_ERROR);
+	    if(fptr == NULL) return(ERR);
 	    (void)strcpy(P_FNAME, fptr);
 	}
 	break;
 	
     case 'O':
     case 'i':
-	if (*inptr != NL)
-	    return SYNTAX_ERROR;
-	if (P_NLINES > 1)
-	    return RANGE_ILLEGAL;
-
+	if(*inptr != NL || P_NLINES > 1)
+	    return(ERR);
+	
 	P_CUR_AUTOIND = P_AUTOINDFLG;
 	if ( P_AUTOINDFLG ) count_blanks(P_LINE1);
-	if((st = append(prevln(P_LINE1), glob)) < 0)
-	    return(st);
+	if(append(prevln(P_LINE1), glob) < 0)
+	    return(ERR);
 	P_FCHANGED = TRUE;
 	break;
 	
@@ -2171,48 +2142,48 @@ docmd(int glob)
 	    pflag++;
 	}
 	if (*inptr != NL || deflt(P_CURLN, P_CURLN+1)<0)
-	    return(SYNTAX_ERROR);
-	if ((st = join(P_LINE1, P_LINE2)) < 0)
-	    return(st);
+	    return(ERR);
+	if (join(P_LINE1, P_LINE2) < 0)
+	    return(ERR);
 	if (pflag || P_PFLG)
-	    if ((st = doprnt(P_CURLN, P_CURLN)) < 0)
-		return(st);
+	    if (doprnt(P_CURLN, P_CURLN) < 0)
+		return(ERR);
 	break;
 	
     case 'k':
 	Skip_White_Space;
 	
 	if (*inptr < 'a' || *inptr > 'z')
-	    return MARK_A_TO_Z;
+	    return ERR;
 	c= *inptr++;
 	
 	if(*inptr != ' ' && *inptr != HT && *inptr != NL)
-	    return(SYNTAX_ERROR);
+	    return(ERR);
 	
 	P_MARK[c-'a'] = P_LINE1;
 	break;
 	
     case 'l':
 	if(*inptr != NL)
-	    return(SYNTAX_ERROR);
+	    return(ERR);
 	if(deflt(P_CURLN,P_CURLN) < 0)
-	    return(BAD_LINE_RANGE);
-	if ((st = dolst(P_LINE1, P_LINE2)) < 0)
-	    return(st);
+	    return(ERR);
+	if (dolst(P_LINE1,P_LINE2) < 0)
+	    return(ERR);
 	break;
 	
     case 'm':
 	if((line3 = getone()) < 0)
-	    return(line3);
+	    return(ERR);
 	if(deflt(P_CURLN,P_CURLN) < 0)
-	    return(BAD_LINE_RANGE);
-	if((st = moveblock(line3)) < 0)
-	    return(st);
+	    return(ERR);
+	if(moveblock(line3) < 0)
+	    return(ERR);
 	P_FCHANGED = TRUE;
 	break;
     case 'n':
 	if(*inptr != NL)
-	    return(SYNTAX_ERROR);
+	    return(ERR);
 	P_FLAGS ^= NFLG_MASK;
 	P_DIAG=!P_DIAG;
 	(void)add_message("number %s, list %s\n",
@@ -2222,16 +2193,16 @@ docmd(int glob)
 #ifdef ED_INDENT
     case 'I':
 	if(P_NLINES > 0)
-	    return(LINE_OR_RANGE_ILL);
+	    return(ERR);
 	if(*inptr != NL)
-	    return(SYNTAX_ERROR);
+	    return(ERR);
 	(void)add_message("Indenting entire code...\n");
 	if (indent_code())
 	    (void)add_message("Indention halted.\n");
 	else 
-	    (void)add_message("Indenting complete.\n");
+	    (void)add_message("Done indenting.\n");
 	break;
-#endif /* INDENT */
+#endif
 	
     case 'H':
     case 'h': 
@@ -2241,11 +2212,11 @@ docmd(int glob)
     case 'P':
     case 'p':
 	if(*inptr != NL)
-	    return(SYNTAX_ERROR);
+	    return(ERR);
 	if(deflt(P_CURLN,P_CURLN) < 0)
-	    return(BAD_LINE_RANGE);
-	if((st = doprnt(P_LINE1,P_LINE2)) < 0)
-	    return(st);
+	    return(ERR);
+	if(doprnt(P_LINE1,P_LINE2) < 0)
+	    return(ERR);
 	break;
 	
     case 'q':
@@ -2253,28 +2224,25 @@ docmd(int glob)
 	    return CHANGED;
 	/* FALLTHROUGH */
     case 'Q':
-        if (*inptr != NL)
-            return SYNTAX_ERROR;
-        if (glob)
-            return SYNTAX_ERROR;
-        if (P_NLINES > 0)
-            return LINE_OR_RANGE_ILL;
-        clrbuf();
-        return (EOF);
+	(void)clrbuf();
+	if(*inptr == NL && P_NLINES == 0 && !glob)
+	    return(EOF);
+	else
+	    return(ERR);
 	
     case 'r':
 	if(P_NLINES > 1)
-	    return(RANGE_ILLEGAL);
+	    return(ERR);
 	
 	if(P_NLINES == 0)		/* The original code tested */
 	    P_LINE2 = P_LASTLN;	/*	if(P_NLINES = 0)    */
 	/* which looks wrong.  RAM  */
 	
 	if(*inptr != ' ' && *inptr != HT && *inptr != NL)
-	    return(SYNTAX_ERROR);
+	    return(ERR);
 	
 	if((fptr = getfn(0)) == NULL)
-	    return(FILE_NAME_ERROR);
+	    return(ERR);
 	
 	if((err = doread(P_LINE2, fptr)) < 0)
 	    return(err);
@@ -2286,31 +2254,26 @@ docmd(int glob)
 	    return(set());
 	Skip_White_Space;
 	if((subpat = optpat()) == NULL)
-	    return(SUB_BAD_PATTERN);
+	    return(ERR);
 	if((gflag = getrhs(rhs)) < 0)
-	    return(SUB_BAD_REPLACEMENT);
+	    return(ERR);
 	if(*inptr == 'p')
 	    pflag++;
 	if(deflt(P_CURLN, P_CURLN) < 0)
-	    return(BAD_LINE_RANGE);
-	if ((nchng = subst(subpat, rhs, gflag, pflag)) < 0)
-	    return(nchng);
+	    return(ERR);
+	if ((nchng = subst(subpat, rhs, gflag, pflag || P_PFLG)) < 0)
+	    return(ERR);
 	if(nchng)
 	    P_FCHANGED = TRUE;
-        if (nchng == 1 && P_PFLG)
-        {
-            if ((st = doprnt(P_CURLN, P_CURLN)) < 0)
-                return st;
-        }
 	break;
 	
     case 't':
 	if((line3 = getone()) < 0)
-	    return(BAD_DESTINATION);
+	    return(ERR);
 	if(deflt(P_CURLN,P_CURLN) < 0)
-	    return(BAD_LINE_RANGE);
-	if((st = transfer(line3)) < 0)
-	    return(st);
+	    return(ERR);
+	if(transfer(line3) < 0)
+	    return(ERR);
 	P_FCHANGED = TRUE;
 	break;
 	
@@ -2319,79 +2282,77 @@ docmd(int glob)
 	apflg = (c=='W');
 	
 	if(*inptr != ' ' && *inptr != HT && *inptr != NL)
-	    return(SYNTAX_ERROR);
+	    return(ERR);
 	
 	if((fptr = getfn(1)) == NULL)
-	    return(FILE_NAME_ERROR);
+	    return(ERR);
 	
 	if(deflt(1, P_LASTLN) < 0)
-	    return(BAD_LINE_RANGE);
-	if((st = dowrite(P_LINE1, P_LINE2, fptr, apflg)) < 0)
-	    return(st);
+	    return(ERR);
+	if(dowrite(P_LINE1, P_LINE2, fptr, apflg) < 0)
+	    return(ERR);
 	P_FCHANGED = FALSE;
 	break;
 	
     case 'x':
 	if(*inptr == NL && P_NLINES == 0 && !glob) {
 	    if((fptr = getfn(1)) == NULL)
-		return(FILE_NAME_ERROR);
+		return(ERR);
 	    if(dowrite(1, P_LASTLN, fptr, 0) >= 0)
 	    {
 		(void)clrbuf();
 		return(EOF);
 	    }
 	}
-	if (P_NLINES)
-	    return (LINE_OR_RANGE_ILL);
-	return(SYNTAX_ERROR);
+	return(ERR);
 	
     case 'z':
 	if(deflt(P_CURLN,P_CURLN) < 0)
-	    return(BAD_LINE_RANGE);
+	    return(ERR);
 	
 	switch(*inptr) {
 	case '-':
-	    if((st = doprnt(P_LINE1-21,P_LINE1)) < 0)
-		return(st);
+	    if(doprnt(P_LINE1-21,P_LINE1) < 0)
+		return(ERR);
 	    break;
 	    
 	case '.':
-	    if((st = doprnt(P_LINE1-11,P_LINE1+10)) < 0)
-		return(st);
+	    if(doprnt(P_LINE1-11,P_LINE1+10) < 0)
+		return(ERR);
 	    break;
 	    
 	case '+':
 	case '\n':
-	    if((st = doprnt(P_LINE1,P_LINE1+21)) < 0)
-		return(st);
+	    if(doprnt(P_LINE1,P_LINE1+21) < 0)
+		return(ERR);
 	    break;
 	}
 	break;
 	
     case 'Z':
 	if(deflt(P_CURLN,P_CURLN) < 0)
-	    return(BAD_LINE_RANGE);
+	    return(ERR);
 	
 	switch(*inptr) {
 	case '-':
-	    if((st = doprnt(P_LINE1-41,P_LINE1)) < 0)
-		return(st);
+	    if(doprnt(P_LINE1-41,P_LINE1) < 0)
+		return(ERR);
 	    break;
 	    
 	case '.':
-	    if((st = doprnt(P_LINE1-21,P_LINE1+20)) < 0)
-		return(st);
+	    if(doprnt(P_LINE1-21,P_LINE1+20) < 0)
+		return(ERR);
 	    break;
 	    
 	case '+':
 	case '\n':
-	    if((st = doprnt(P_LINE1,P_LINE1+41)) < 0)
-		return(st);
+	    if(doprnt(P_LINE1,P_LINE1+41) < 0)
+		return(ERR);
 	    break;
 	}
 	break;	
     default:
-	return(UNRECOG_COMMAND);
+	return(ERR);
     }
     
     return (0);
@@ -2399,7 +2360,7 @@ docmd(int glob)
 
 
 /*	doglob.c	*/
-static int
+int
 doglob()
 {
     int	lin, status;
@@ -2423,7 +2384,7 @@ doglob()
 	ptr->l_stat &= ~LGLOB;
 	P_CURLN = lin; P_CURPTR = ptr;
 	inptr = cmd;
-	if((status = getlst()) < 0 && status != NO_LINE_RANGE)
+	if((status = getlst()) < 0)
 	    return(status);
 	if((status = docmd(1)) < 0)
 	    return(status);
@@ -2444,7 +2405,6 @@ void
 ed_start(char *file_arg, struct closure *exit_func)
 {
     struct svalue *setup;
-
     if (!command_giver->interactive)
 	error("Tried to start an ed session on a non-interative player.\n");
     if (ED_BUFFER)
@@ -2490,7 +2450,7 @@ ed_start(char *file_arg, struct closure *exit_func)
 
 		switch (setup->type)
 		{
-		    case T_ARRAY:
+		    case T_POINTER:
 			for (i = 0; i < setup->u.vec->size; ++i)
 			    if (setup->u.vec->item[i].type == T_STRING)
 				(void)ins(setup->u.vec->item[i].u.string);
@@ -2543,17 +2503,66 @@ free_ed_buffer()
 	}
 	free_closure(function);
     }
+    else
+	(void)add_message("Exit from ed.\n");
+    return;
 }
 
-static void 
-report_status(int status)
+void 
+ed_cmd(char *str)
 {
+    char cmd[MAXLINE];
+    int status;
+
+    strncpy(cmd, str, MAXLINE - 1);
+    
+    if (P_MORE)
+    {
+	print_help2();
+	return;
+    }
+    
+    if (P_APPENDING)
+    {
+	more_append(cmd);
+	return;
+    }
+
+    /* Is this needed? */
+    if (strlen(cmd) < (MAXLINE - 2))
+    {
+        strcat(cmd, "\n");
+    }
+    
+    strncpy(inlin, cmd, MAXLINE - 1);    
+    inlin[MAXLINE - 1] = 0;
+    inptr = inlin;
+    if(getlst() >= 0) {
+	if((status = ckglob()) != 0)
+	{
+	    if(status >= 0 && (status = doglob()) >= 0)
+	    {
+		setCurLn( status );
+		return;
+	    }
+	}
+	else
+	{
+	    if((status = docmd(0)) >= 0)
+	    {
+		if(status == 1)
+		    (void)doprnt(P_CURLN, P_CURLN);
+		return;
+	    }
+	}
+    } else {
+	status = UNSPEC_FAIL;
+    }
     switch (status)
     {
     case EOF:
-        free_ed_buffer();
-        (void)add_message("Exit from ed.\n");
-        return;
+	free_ed_buffer();
+	return;
     case FATAL:
 	if (ED_BUFFER->exit_func)
 	    free_closure(ED_BUFFER->exit_func);
@@ -2563,97 +2572,22 @@ report_status(int status)
 	set_prompt(PROMPT);
 	return;
     case CHANGED:
-        (void)add_message("File has been changed.\n");
-        break;
+	(void)add_message("File has been changed.\n");
+	break;
     case SET_FAIL:
-        (void)add_message("`set' command failed.\n");
-        break;
+	(void)add_message("`set' command failed.\n");
+	break;
     case SUB_FAIL:
-        (void)add_message("string substitution failed.\n");
-        break;
+	(void)add_message("string substitution failed.\n");
+	break;
     case MEM_FAIL:
-        (void)add_message("Out of memory: text may have been lost.\n");
-        break;
-    case UNRECOG_COMMAND:
-        (void)add_message("Unrecognized command.\n");
-        break;
-    case BAD_LINE_RANGE:
-        (void)add_message("Bad line range.\n");
-        break;
-    case BAD_LINE_NUMBER:
-        (void)add_message("Bad line number.\n");
-        break;
-    case SYNTAX_ERROR:
-        (void)add_message("Bad command syntax.\n");
-        break;
-    case RANGE_ILLEGAL:
-        (void)add_message("Cannot use ranges with that command.\n");
-        break;
-    case LINE_OR_RANGE_ILL:
-        (void)add_message("Cannot use lines or ranges with that command.\n");
-        break;
-    case FILE_NAME_ERROR:
-        (void)add_message("File command failed.\n");
-        break;
-    case MARK_A_TO_Z:
-        (void)add_message("A mark must be in the range 'a to 'z.\n");
-        break;
-    case SUB_BAD_PATTERN:
-        (void)add_message("Bad pattern in search and replace.\n");
-        break;
-    case SUB_BAD_REPLACEMENT:
-        (void)add_message("Bad replacement in search and replace.\n");
-        break;
-    case BAD_DESTINATION:
-        (void)add_message("Bad destination for move or copy.\n");
-        break;
-    case END_OF_FILE:
-        (void)add_message("End of file.\n");
-        break;
-    case SEARCH_FAILED:
-        (void)add_message("Search failed.\n");
-        break;
+	(void)add_message("Out of memory: text may have been lost.\n" );
+	break;
     default:
 	(void)add_message("Unrecognized or failed command.\n");
+	/*  Unrecognized or failed command (this  */
+	/*  is SOOOO much better than "?" 	  */
     }
-}
-
-void 
-ed_cmd(char *str)
-{
-    int status;
-    
-    if (P_MORE)
-    {
-	print_help2();
-	return;
-    }
-    if (P_APPENDING)
-    {
-	more_append(str);
-	return;
-    }
-    if (strlen(str) < MAXLINE)
-	(void)strcat(str, "\n");
-    
-    (void)strncpy(inlin, str, MAXLINE - 1);
-    inlin[MAXLINE - 1] = 0;
-    inptr = inlin;
-    if ((status = getlst()) >= 0 || status == NO_LINE_RANGE) {
-        if ((status = ckglob()) != 0) {
-            if (status >= 0 && (status = doglob()) >= 0) {
-                setCurLn(status);
-                return;
-            }
-        } else {
-            if ((status = docmd(0)) >= 0) {
-                if (status == 1)
-                    doprnt(P_CURLN, P_CURLN);
-                return;
-            }
-        }
-    }
-    report_status(status);
 }
 
 void 
@@ -2696,14 +2630,16 @@ print_help(int arg)
 	(void)add_message("mail me at gaunt@mcs.anl.gov with any pieces of code which\n");
 	(void)add_message("don't get indented properly.\n");
 	break;
-#endif /* INDENT */
-    case '&':
-	(void)add_message("Command: &   Usage: &pattern\n");
+#endif
+#if 0
+    case '^':
+	(void)add_message("Command: ^   Usage: ^pattern\n");
 	(void)add_message("This command is similiar to grep, in that it searches the\n");
 	(void)add_message("entire file, printing every line that contains the specified\n");
 	(void)add_message("pattern.  To get the line numbers of found lines, turn on line\n");
 	(void)add_message("number printing with the 'n' command.\n");
 	break;
+#endif
     case 'n':
 	(void)add_message("Command: n   Usage: n\n");
 	(void)add_message("This command toggles the internal flag which will cause line\n");
@@ -2819,37 +2755,33 @@ Like the 'a' command, but uses inverse autoindent mode.\n");
 	break;
     case 's':
 	if ( *inptr=='e' && *(inptr+1)=='t' ) {
-	    (void)add_message("Without arguments: show current settings.\n");
-	    (void)add_message("'set save' will preserve the current settings for subsequent invocations of ed.\n");
-	    (void)add_message("Options:\n");
-	    (void)add_message("\n");
-	    (void)add_message("number	   will print line numbers before printing or inserting a lines\n");
-	    (void)add_message("list	   will print control characters in p(rint) and z command like in l(ist)\n");
-	    (void)add_message("print	   will show current line after a single substitution\n");
-	    (void)add_message("eightbit\n");
-	    (void)add_message("autoindent will preserve current indentation while entering text.\n");
-	    (void)add_message("use ^D or ^K to get back one step back to the right.\n");
-	    (void)add_message("excompatible will exchange the meaning of \\( and ( as well as \\) and )\n");
-	    (void)add_message("\n");
-	    (void)add_message("An option can be cleared by prepending it with 'no' in the set command, e.g.\n");
-	    (void)add_message("'set nolist' to turn off the list option.\n");
-	    (void)add_message("\n");
-	    (void)add_message("set shiftwidth <digit> will store <digit> in the shiftwidth variable, which\ndetermines how much blanks are removed from the current indentation when\ntyping ^D or ^K in the autoindent mode.\n");
+	    (void)add_message("\
+Without arguments: show current settings.\n\
+'set save' will preserve the current settings for subsequent invocations of ed.\n\
+Options:\n\
+\n\
+number	   will print line numbers before printing or inserting a lines\n\
+list	   will print control characters in p(rint) and z command like in l(ist)\n\
+print	   will show current line after a single substitution\n\
+eightbit\n\
+autoindent will preserve current indentation while entering text.\n\
+	   use ^D or ^K to get back one step back to the right.\n\
+excompatible will exchange the meaning of \\( and ( as well as \\) and )\n\
+\n\
+An option can be cleared by prepending it with 'no' in the set command, e.g.\n\
+'set nolist' to turn off the list option.\n\
+\n\
+set shiftwidth <digit> will store <digit> in the shiftwidth variable, which\n\
+determines how much blanks are removed from the current indentation when\n\
+typing ^D or ^K in the autoindent mode.\n");
+		break;
 	}
-	break;
-    case '/':
-        (void)add_message("Command: /   Usage: /pattern\n");
-        (void)add_message("finds the next occurence of 'pattern'.  Note that pattern\nis a regular expression, so things like .*][() have to be preceded by a \\.\n");
-        break;
-    case '?':
-        (void)add_message("Command: ?   Usage: ?pattern\n");
-        (void)add_message("finds the last occurence of 'pattern' before the current line.  Note that pattern\nis a regular expression, so things like .*][() have to be preceded by a \\.\n");
-        break;
-
 	/* is there anyone who wants to add an exact description for the 's' command? */
 	/* FALLTHROUGH */
     case 'w':
     case 'W':
+    case '/':
+    case '?':
 	(void)add_message("Sorry no help yet for this command. Try again later.\n");
 	break;
     default:
@@ -2859,7 +2791,7 @@ Like the 'a' command, but uses inverse autoindent mode.\n");
 	(void)add_message("\n\nCommands\n--------\n");
 	(void)add_message("/\tsearch forward for pattern\n");
 	(void)add_message("?\tsearch backward for a pattern\n");
-	(void)add_message("&\tglobal search and print for pattern\n");
+	/* (void)add_message("^\tglobal search and print for pattern\n"); */
 	(void)add_message("=\tshow current line number\n");
 	(void)add_message("a\tappend text starting after this line\n");
 	(void)add_message("A\tlike 'a' but with inverse autoindent mode\n"),
@@ -2873,7 +2805,7 @@ Like the 'a' command, but uses inverse autoindent mode.\n");
 	(void)add_message("i\tinsert text starting before this line\n");
 #ifdef ED_INDENT
 	(void)add_message("I\tindent the entire code (Qixx version 1.0)\n");
-#endif /* INDENT */
+#endif
 	(void)add_message("\n--Return to continue--");
 	P_MORE=1;
 	break;
@@ -2889,12 +2821,10 @@ print_help2()
     (void)add_message("l\tline line(s) with control characters displayed\n");
     (void)add_message("m\tmove line(s) to specified line\n");
     (void)add_message("n\ttoggle line numbering\n");
-    (void)add_message("O\tsame as 'i'\n");
-    (void)add_message("o\tsame as 'i'\n");
     (void)add_message("p\tprint line(s) in range\n");
     (void)add_message("q\tquit editor\n");
-    (void)add_message("Q\tquit editor even if file modified and not saved\n\r\tread file into editor at end of file or behind the given line\n");
-    (void)add_message("r\tread file into editor at end of file or behind the given line\n");
+    (void)add_message("Q\tquit editor even if file modified and not saved\n\
+r\tread file into editor at end of file or behind the given line\n");
     (void)add_message("s\tsearch and replace\n");
     (void)add_message("set\tquery, change or save option settings\n");
     (void)add_message("t\tmove copy of line(s) to specified line\n");

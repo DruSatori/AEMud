@@ -29,6 +29,18 @@
  * ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
 
-void udpsvc_init(int);
-void udpsvc_shutdown(void);
+#ifndef _UDPSVC_H
+#define _UDPSVC_H
+#include "ndesc.h"
+#include "nqueue.h"
+
+typedef struct {
+    ndesc_t *nd;
+    nqueue_t *nq;
+    struct task *task;
+} udpsvc_t;
+
+udpsvc_t *udpsvc_init(int);
+void udpsvc_shutdown(udpsvc_t *);
 int udpsvc_send(char *, int, char *);
+#endif

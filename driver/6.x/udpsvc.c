@@ -44,6 +44,7 @@
 #include "ndesc.h"
 #include "nqueue.h"
 #include "net.h"
+#include "backend.h"
 
 #ifdef CATCH_UDP_PORT
 
@@ -60,13 +61,11 @@
  */
 #define	UDPSVC_RAWQ_SIZE	1024
 
-static ndesc_t *udpsvc_nd = NULL;
-
 /*
  * Send a UDP datagram.
  */
 int
-udpsvc_send(char *dest, int port, char *cp)
+udpsvc_send(udpsvc_t *svc, char *dest, int port, char *cp)
 {
     struct sockaddr_in addr;
     int cc;
@@ -93,59 +92,101 @@ udpsvc_send(char *dest, int port, char *cp)
 #endif
     }
 
-    cc = sendto(nd_fd(udpsvc_nd), cp, strlen(cp), 0,
+    cc = sendto(nd_fd(svc->nd), cp, strlen(cp), 0,
 	     (struct sockaddr *)&addr, sizeof (addr));
 
     return cc != -1;
 }
 
-/*
- * Read and process a UDP datagram.
- */
-static void
-udpsvc_read(ndesc_t *nd, nqueue_t *nq)
+static int
+read_datagram(udpsvc_t *svc)
 {
     int addrlen, cc;
     struct sockaddr_in addr;
 
-    addrlen = sizeof (addr);
-
-    cc = recvfrom(nd_fd(nd), nq_wptr(nq), nq_size(nq) - 1, 0,
+    /* Get another datagram */
+    cc = recvfrom(nd_fd(svc->nd), nq_wptr(svc->nq), nq_size(svc->nq) - 1, 0,
 	     (struct sockaddr *)&addr, &addrlen);
 
-    if (cc == -1)
+    if (cc == -1) {
+	return 0;
+    }
+
+    nq_wptr(svc->nq)[cc] = '\0';
+
+    return 1;
+}
+
+static void
+udpsvc_process(udpsvc_t *svc)
+{
+    int addrlen, cc;
+    struct sockaddr_in addr;
+    struct gdexception exception_frame;
+    
+    update_udp_av();
+
+    exception_frame.e_exception = exception;
+    exception_frame.e_catch = 0;
+
+    exception = &exception_frame;
+
+    
+    if (setjmp(exception_frame.e_context) == 0)
+    {
+	push_string(inet_ntoa(addr.sin_addr), STRING_MSTRING);
+	push_string((char *)nq_rptr(svc->nq), STRING_MSTRING);
+	(void)apply_master_ob(M_INCOMING_UDP, 2);
+    }
+    exception = exception->e_exception;
+    addrlen = sizeof (addr);
+
+    if (!read_datagram(svc)) {
+	nd_enable(svc->nd, ND_R);
+	svc->task = 0;
 	return;
+    }
+    reschedule_task(svc->task);
+}
 
-    nq_wptr(nq)[cc] = '\0';
+/*
+ * Read an UPD datagram 
+ */
+static void
+udpsvc_read(ndesc_t *nd, udpsvc_t *svc)
+{
+    int addrlen, cc;
+    struct sockaddr_in addr;
+    struct gdexception exception_frame;
 
-    /* XXX We need a safe master apply XXX */
-    push_string(inet_ntoa(addr.sin_addr), STRING_MSTRING);
-    push_string((char *)nq_rptr(nq), STRING_MSTRING);
-    (void)apply_master_ob(M_INCOMING_UDP, 2);
+    if (read_datagram(svc)) {
+	nd_disable(udpsvc_nd, ND_R);
+	svc->task = create_task(udpsvc_process);
+    }
 }
 
 /*
  * Close the UDP Manager session and free the associated resources.
  */
 static void
-udpsvc_shutdown(ndesc_t *nd, nqueue_t *nq)
+udpsvc_shutdown(ndesc_t *nd, udpsvc_t *svc)
 {
     (void)close(nd_fd(nd));
-    nq_free(nq);
+    nq_free(svc->nq);
     nd_detach(nd);
-    udpsvc_nd = NULL;
+    free(svc);
 }
 
 /*
  * Initialize the UDP Manager.
  */
-void
+udpsvc_t *
 udpsvc_init(int port)
 {
     int s;
     struct sockaddr_in addr;
-    nqueue_t *nq;
-
+    struct udpsvc_t *svc;
+    
     s = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
     if (s == -1)
 	fatal("udp_init: socket() error = %d.\n", errno);
@@ -164,7 +205,7 @@ udpsvc_init(int port)
 	    (void)fprintf(stderr, "UDP Socket already bound!\n");
 	    debug_message("UDP Socket already bound!\n");
 	    (void)close(s);
-	    return;
+	    return 0;
 	} 
 	else 
 	{
@@ -173,11 +214,12 @@ udpsvc_init(int port)
     }
 
     enable_nbio(s);
-
-    nq = nq_alloc(UDPSVC_RAWQ_SIZE);
-    udpsvc_nd = nd_attach(s, udpsvc_read, NULL, NULL, NULL, udpsvc_shutdown,
-		    nq);
-    nd_enable(udpsvc_nd, ND_R);
+    svc = xalloc(sizeof(*udpsvc));
+    svc->nq = nq_alloc(UDPSVC_RAWQ_SIZE);
+    svc->nd = nd_attach(s, udpsvc_read, NULL, NULL, NULL, udpsvc_shutdown,
+			svc);
+    nd_enable(svc->nd, ND_R);
+    return svc;
 }
 
 #endif /* CATCH_UDP_PORT */

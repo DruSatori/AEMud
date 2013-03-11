@@ -1,11 +1,11 @@
 NAME
-        rnd - give a random value
+        rnd - unit float random number generator
 
 SYNOPSIS
-        float rnd()
-        
+        float  rnd(float)
+
 DESCRIPTION
-	Gives a random float value in the interval [0.0, 1.0)
+        rnd() returns a random number in the interval [0.0, 1.0).
 
 SEE ALSO
-	random
+        math - for a list of other math functions available.

@@ -1,4 +1,3 @@
-#ifdef MALLOC_bibopmalloc
 /*
 **
 ** This is a special purpose malloc for lpmud.
@@ -47,12 +46,15 @@
 ** that the space overhead is around 15%.
 */
 
-/*#define BIBOP_DEBUG */
-/*#define FREESTAT*/
-#define PARANOIA
+/* #define BIBOP_DEBUG */
+/* #define FREESTAT */
+/* #define PARANOIA */
 
 #include <stdio.h>
 #include <stdlib.h>
+#include <unistd.h>
+#include <stdint.h>
+#include <unistd.h>
 #include <string.h>
 #include "config.h"
 #include <math.h>
@@ -63,15 +65,9 @@
 #include "simulate.h"
 #endif
 
-#ifdef __alpha
-#define SMALL_SIZE 96		/* smaller than this is uses bibop */
-#define PAGE_SIZE 0x10000	/* 64k pages MUST!! be a power of 2 */
-#define SIZE_SLOP 96		/* don't split a free space if leftover is less than this */
-#else
-#define SMALL_SIZE 56		/* smaller than this is uses bibop */
-#define PAGE_SIZE 0x8000	/* 32k pages MUST!! be a power of 2 */
-#define SIZE_SLOP 56		/* don't split a free space if leftover is less than this */
-#endif
+#define SMALL_SIZE 0x80		/* smaller than this is uses bibop */
+#define PAGE_SIZE 0x20000	/* 128k pages MUST!! be a power of 2 */
+#define SIZE_SLOP 0x80		/* don't split a free space if leftover is less than this */
 #define NFREE 20		/* number of headers for medium blocks */
 
 typedef double aligntype;
@@ -97,19 +93,15 @@ struct bibop {
     void *objs;			/* Pointer to first object */
 };
 #define BIBOPMAGIC 0x55AA5A01
-static int p_bibop, m_bibop, f_bibop;
-static long s_bibop;
+static long long p_bibop, m_bibop, f_bibop;
+static long long s_bibop;
 
 struct medium {
-#if 0
-    int freecnt;		/* number of free objects in this page */
-    int maxfree;		/* largest free object, or 0 if unknown */
-#endif
     aligntype data;
 };
 #define ALLOCMAGIC 0x55AA5A02
-static int p_alloc, m_alloc, f_alloc;
-static long s_alloc;
+static long long p_alloc, m_alloc, f_alloc;
+static long long s_alloc;
 #define OBJSIZE(cur) ((char *)cur->next - (char *)OBJ_TO_DATA(cur))
 
 struct freeblk {
@@ -132,8 +124,8 @@ struct big {
     aligntype data;
 };
 #define BIGMAGIC 0x55AA5A03
-static int p_big, m_big, f_big;
-static long s_big;
+static long long p_big, m_big, f_big;
+static long long s_big;
 
 struct descr {
     int magic;			/* magic number for different page types */
@@ -145,9 +137,6 @@ struct descr {
     } u;
 };
 
-#ifdef USE_SWAP
-extern int used_memory; /* for the swap to know */
-#endif
 
 static struct descr *bibops[(SMALL_SIZE+ALIGNMENT-1)/ALIGNMENT]; /* start of bibop chains */
 
@@ -155,10 +144,10 @@ static struct descr *newbibop(unsigned int);
 
 static struct descr *firstpage;
 
-typedef unsigned long PTR;	/* same size as a pointer */
+typedef uintptr_t PTR;	/* same size as a pointer */
 
 static struct descr *freepage = 0;
-static int p_free;
+static long long p_free;
 
 struct block {
 #ifdef BIBOP_DEBUG
@@ -178,14 +167,6 @@ struct block {
 static char *nextpage, *firstsbrk;
 
 static int initdone = 0;
-
-#if defined(__OpenBSD__) || defined(__NetBSD__) || defined(__FreeBSD__) || defined(__bsdi__) || defined(__MACOSX__)
-extern char *sbrk(int);
-#elif defined(SOLARIS)
-extern void *sbrk(int);
-#else
-extern void *sbrk();
-#endif
 
 char *dump_malloc_data(void);
 static void bibop_init(void);
@@ -266,10 +247,10 @@ pages(unsigned int n)
 	    if ((char *)(*last) + (*last)->u.big.npages * PAGE_SIZE == nextpage) {
 		int k = n - (*last)->u.big.npages;
 		r = sbrk(k*PAGE_SIZE);
-		if (!r || r == (void *)-1) {
-		    (void)fprintf(stderr, "sbrk(%ld) failed %ld(0x%lx)\n", 
+		if (!r || (intptr_t)r == -1) {
+		    (void)fprintf(stderr, "sbrk(%ld) failed %ld(0x%lx) with return value %p\n", 
 			    (long) k*PAGE_SIZE, (long)(nextpage - firstsbrk),
-			    (unsigned long)(nextpage - firstsbrk));
+			    (unsigned long)(nextpage - firstsbrk), r);
 		    return 0;
 		}
 		nextpage += k*PAGE_SIZE;
@@ -318,15 +299,15 @@ pages(unsigned int n)
     (void)fprintf(stderr, " fresh\n");
 #endif
     r = sbrk(n*PAGE_SIZE);
-    if (!r || r == (void *)-1)
+    if (!r || (intptr_t)r == -1)
     {
-	(void)fprintf(stderr, "sbrk failed %ld\n", (long)(nextpage - firstsbrk));
+	(void)fprintf(stderr, "sbrk failed %ld with return value %p\n", (long)(nextpage - firstsbrk), r);
 	return 0;
     }
     if (!(nextpage - PAGE_SIZE <= (char *)r && (char *)r <= nextpage + PAGE_SIZE))
     {
-	(void)fprintf(stderr, "bad sbrk %lx %lx\n", (unsigned long) r,
-		(unsigned long) nextpage);
+	(void)fprintf(stderr, "bad sbrk %p %p\n", r,
+		nextpage);
     }
     r = nextpage;
     nextpage += n*PAGE_SIZE;
@@ -366,9 +347,6 @@ init_allocpage(struct descr *p)
     struct block *first, *last;
 
     p->magic = ALLOCMAGIC;
-#if 0
-    p->u.medium.freecnt = 1;		/* one free block after init */
-#endif
     p->dnext = 0;
     first = (struct block *)&p->u.medium.data;
     last = (struct block *)((char *)p + PAGE_SIZE - sizeof(struct block));
@@ -381,9 +359,6 @@ init_allocpage(struct descr *p)
     last->busy = 0;
     last->next = 0;
     insfree(first, 0);
-#if 0
-    p->u.medium.maxfree = OBJSIZE(first);
-#endif
 }
 
 /* Do a non-small allocation */
@@ -392,7 +367,7 @@ bigmalloc(unsigned int size)
 {
     struct descr *p;
     struct block *cur, *next;
-    int cursize;
+    int cursize, i;
 
     if (size > PAGE_SIZE - sizeof(struct descr) - ALIGNMENT - PTR_SIZE) {
 	/* really big! */
@@ -400,9 +375,6 @@ bigmalloc(unsigned int size)
 	struct descr *bigp = pages(n);
 	if (!bigp)
 	    return 0;
-#ifdef USE_SWAP
-	used_memory += n * PAGE_SIZE; /* for the swap to know */
-#endif
 	p_big += n;
 	bigp->magic = BIGMAGIC;
 	bigp->u.big.npages = n;
@@ -411,42 +383,22 @@ bigmalloc(unsigned int size)
 	return (void *)&bigp->u.big.data;
     }
 	
-#if 0
-    /* find first page with enough space */
-    for(p = firstpage; p; p = p->next) {
-	if (p->u.medium.freecnt == 0 || p->u.medium.maxfree && p->u.medium.maxfree < size)
-	    continue;
-	for(cur = (struct block *)&p->u.medium.data; cur->next; cur = cur->next) {
-	    if (cur->busy)
-		continue;
-	    next = cur->next;
-	    cursize = OBJSIZE(cur);
-	    if (cursize > p->u.medium.maxfree)
-		p->u.medium.maxfree = cursize;
-	    if (cursize >= size)
-		goto found;
-	}
-    }
-#else
-    {
-	/* find first block which is big enough */
-	int i;
-	for(i = 0; i < NFREE; i++) {
-	    if (freehead[i].maxsize > size) {
-		struct freeblk *fp;
-		for(fp = freehead[i].h.fwd; fp != &freehead[i].h; fp = fp->fwd) {
-		    cur = DATA_TO_OBJ(fp);
-		    cursize = OBJSIZE(cur);
-		    if (cursize >= size) {
-			p = (struct descr *)((PTR)cur & PAGEMASK);
-			goto found;
-		    }
+    /* find first block which is big enough */
+    for(i = 0; i < NFREE; i++) {
+	if (freehead[i].maxsize > size) {
+	    struct freeblk *fp;
+	    for(fp = freehead[i].h.fwd; fp != &freehead[i].h; fp = fp->fwd) {
+		cur = DATA_TO_OBJ(fp);
+		cursize = OBJSIZE(cur);
+		if (cursize >= size) {
+		    p = (struct descr *)((PTR)cur & PAGEMASK);
+		    goto found;
 		}
-		freehead[i].nskip++;
 	    }
+	    freehead[i].nskip++;
 	}
     }
-#endif
+
     /* No page had a block that was big enough, get a new one. */
     p = pages(1);
     if (!p)
@@ -463,9 +415,6 @@ bigmalloc(unsigned int size)
 	(void)fprintf(stderr, "bad magic 2\n");
 	abort();
     }
-#endif
-#if 0
-    p->u.medium.freecnt--;		/* used one free */
 #endif
     FDEL(&cur->u.fb);			/* remove from free lists */
 #ifdef FREESTAT
@@ -500,23 +449,11 @@ bigmalloc(unsigned int size)
 	if ((struct descr *)((PTR)cur->next & PAGEMASK) != p) 
 	    abort();
 #endif
-#if 0
-	p->u.medium.freecnt++;		/* split one into two */
-	if (p->u.medium.maxfree == cursize)
-	    p->u.medium.maxfree = OBJSIZE(next);
-#endif
 	insfree(next, 1);		/* insert second half */
     }
     cur->busy = 1;
     m_alloc++;
     s_alloc += size;
-#if 0
-    if (p->u.medium.maxfree == cursize)
-	p->u.medium.maxfree = 0;
-#endif
-#ifdef USE_SWAP
-    used_memory += OBJSIZE(cur); /* for the swap to know */
-#endif
     return (void *)&cur->u.data;
 }
 
@@ -539,6 +476,19 @@ static int flsb[] = {
 5, 0, 1, 0, 2, 0, 1, 0, 3, 0, 1, 0, 2, 0, 1, 0, 
 4, 0, 1, 0, 2, 0, 1, 0, 3, 0, 1, 0, 2, 0, 1, 0, 
 };
+
+#ifdef DEBUG
+static void
+missaligned_free(void *ptr, void *should_be)
+{
+    if (mstring_magic(should_be + mstring_header) == MSTRING_MAGIC)
+	fatal("freeing m-magic string: %s\n", (char *)should_be + mstring_header);
+    if (sstring_magic(should_be + sstring_header) == SSTRING_MAGIC)
+	fatal("freeing s-magic string: %s\n", (char *)should_be + sstring_header);
+    fatal("Freeing different pointer than malloced is %p should be %p.\n", ptr, should_be);
+    
+}
+#endif
 
 /* External interface */
 void *
@@ -600,9 +550,6 @@ malloc(size_t size)
     j += flsb[(int)m];
     bp->u.bibop.freemap[i] &= ~ ((mapword)1<<j);	/* mark as allocated */
     bp->u.bibop.objfree--;		/* one less free */
-#ifdef USE_SWAP
-    used_memory += bp->u.bibop.objsize;
-#endif
     m_bibop++;
     s_bibop += size;
     return (void *) ((char *)bp->u.bibop.objs + (i * BITS_PER_MAPWORD + j) * size);
@@ -633,20 +580,15 @@ free(void *ptr)
 
     if (!initdone)
 	return;
-#ifdef DEBUG
-    if (mstring_magic(ptr) == MSTRING_MAGIC)
-	fatal("freeing m-magic string: %s\n", ptr);
-    if (sstring_magic(ptr) == SSTRING_MAGIC)
-	fatal("freeing s-magic string: %s\n", ptr);
-#endif
     bp = (struct descr *)((PTR)ptr & PAGEMASK);
     if (bp->magic == BIGMAGIC) {
 	/* freeing really big block, stuff all pages on free list */
 	int n = bp->u.big.npages;
-
-#ifdef USE_SWAP
-	used_memory -= n * PAGE_SIZE; /* for the swap to know */
+#ifdef DEBUG
+        if (ptr != &bp->u.big.data)
+            missaligned_free(ptr, &bp->u.big.data);
 #endif
+
 	insertfreepage(bp);
 	f_big++;
 	p_big -= n;
@@ -654,28 +596,24 @@ free(void *ptr)
     } else if (bp->magic == ALLOCMAGIC) {
 	/* freeing part of a page */
 	struct block *this, *cur, *next;
-#if 0
-	int cursize;
-#endif
 
-#ifdef USE_SWAP
-	used_memory -= OBJSIZE(DATA_TO_OBJ(ptr)); /* for the swap to know */
-#endif	
+	this = DATA_TO_OBJ(ptr);
+#ifdef DEBUG
+        if (ptr != &this->u.data)
+            missaligned_free(ptr, &this->u.data);
+#endif
+            
 #ifdef BIBOP_DEBUG
 	if (DATA_TO_OBJ(ptr)->bmagic != BMAGIC) {
 	    (void)fprintf(stderr, "bad magic 3\n");
 	    abort();
 	}
 #endif
-	this = DATA_TO_OBJ(ptr);
 #ifdef PARANOIA
 	if (!this->busy)
 	    abort();
 #endif
 	this->busy = 0;
-#if 0
-	bp->u.medium.freecnt++; /* another free */
-#endif
 	insfree(this, 2);
 	/* coalescing is tedious since we don't have back pointers */
 	for(cur = (struct block *)&bp->u.medium.data; cur->next; cur = cur->next)
@@ -704,9 +642,6 @@ free(void *ptr)
 	    if ((struct descr *)((PTR)cur->next & PAGEMASK) != bp)
 		abort();
 #endif
-#if 0
-	    bp->u.medium.freecnt--;	/* joined two free into one */
-#endif
 #ifdef FREESTAT
 	    cur->u.fb.head->njoin1++;
 	    next->u.fb.head->njoin2++;
@@ -715,11 +650,6 @@ free(void *ptr)
 	    FDEL(&next->u.fb);
 	    insfree(cur, 3);
 	}
-#if 0
-	cursize = OBJSIZE(cur);
-	if (cursize > bp->u.medium.maxfree)
-	    bp->u.medium.maxfree = cursize;
-#endif
 
 	if (((struct block *)&bp->u.medium.data)->next->next == 0) {
 	    /* The whole page is free now, move it to free list */
@@ -742,6 +672,10 @@ free(void *ptr)
 	offs = ((char *)ptr - (char *)bp->u.bibop.objs) / bp->u.bibop.objsize; /* block offset from first block */
 	i = offs / BITS_PER_MAPWORD;
 	j = offs % BITS_PER_MAPWORD;
+#ifdef DEBUG
+        if (ptr != (char *)bp->u.bibop.objs + (offs * bp->u.bibop.objsize))
+            missaligned_free(ptr, (char *)bp->u.bibop.objs + (offs * bp->u.bibop.objsize));
+#endif
 #ifdef PARANOIA
 	if (bp->u.bibop.freemap[i] & (mapword)1<<j)
 	    abort();
@@ -750,9 +684,6 @@ free(void *ptr)
 	bp->u.bibop.nextfree = i;	/* we have a free block here */
 	bp->u.bibop.objfree++;		/* one more free */
 	f_bibop++;
-#ifdef USE_SWAP
-	used_memory -= bp->u.bibop.objsize;
-#endif
     } else {
 	/* Happens when freeing prematurely allocated objects. */
 	(void)fprintf(stderr, "Warning, bad magic number in free %x (%p)\n",
@@ -766,26 +697,6 @@ cfree(void *ptr)
 {
     free(ptr);
 }
-
-#if 0
-/* Figure out (maximum) object size. */
-static unsigned int
-objsize(void *ptr)
-{
-    register struct descr *bp;
-
-    bp = (struct descr *)((PTR)ptr & PAGEMASK);
-    if (bp->magic == BIGMAGIC) {
-	return bp->u.big.npages * PAGE_SIZE;
-    } else if (bp->magic == ALLOCMAGIC) {
-	return OBJSIZE(DATA_TO_OBJ(ptr));
-    } else if (bp->magic == BIBOPMAGIC) {
-	return bp->u.bibop.objsize;
-    } else {
-	return -1;
-    }
-}
-#endif
 
 /* External interface */
 void *
@@ -892,7 +803,7 @@ bibop_init()
     for(s = smult, i = 0; i < NFREE; i++, s *= smult) {
 	freehead[i].h.fwd = &freehead[i].h;
 	freehead[i].h.bwd = &freehead[i].h;
-	freehead[i].maxsize = (int) (mins * s);
+	freehead[i].maxsize = (int) (mins * s + 0.5);
 	/*(void)fprintf(stderr, "bucket %d holds size <%d\n", i, freehead[i].maxsize);*/
 #ifdef FREESTAT
 	freehead[i].h.head = &freehead[i];
@@ -905,7 +816,7 @@ char *
 dump_malloc_data()
 {
     static char mbuf[3000];
-    int u_bibop, u_alloc, u_big, n_bibop, n_alloc, n_big, a_bibop, a_alloc, a_big;
+    long long u_bibop, u_alloc, u_big, n_bibop, n_alloc, n_big, a_bibop, a_alloc, a_big;
     struct descr *p;
     int i, n;
 
@@ -929,25 +840,29 @@ dump_malloc_data()
     }
     u_big = PAGE_SIZE * p_big;
     (void)sprintf(mbuf, "\
-%-17s %10s %10s %10s %10s\n\
-%-17s %10d %10d %10d %10d\n\
-%-17s %10d %10d %10d %10d (%d in free pages)\n\
-%-17s %10d %10d %10d %10d\n\
-%-17s %10d %10d %10d %10d\n\
-%-17s %10d %10d %10d %10d (%d free) = %d bytes (page=%d)\n\
+%-17s %13s %13s %13s %13s\n\
+%-17s %13lld %13lld %13lld %13lld\n\
+%-17s %13lld %13lld %13lld %13lld\n\
+%-17s (%lld in free pages)\n\
+%-17s %13lld %13lld %13lld %13lld\n\
+%-17s %13lld %13lld %13lld %13lld\n\
+%-17s %13lld %13lld %13lld %13lld\n\
+%-17s (%lld free) = %lld bytes (page=%lld)\n\
 \n\
-%-17s %10d %10d %10d %10d\n\
-%-17s %10d %10d %10d %10d\n\
-%-17s %10ld %10ld %10ld %10ld\n\
+%-17s %13lld %13lld %13lld %13lld\n\
+%-17s %13lld %13lld %13lld %13lld\n\
+%-17s %13lld %13lld %13lld %13lld\n\
 \n\
-sbrk requests: %d %d (a) \n\
+sbrk requests: %lld %lld (a) \n\
 ", 
 	    "",            "small", "medium", "large", "total",
 	    "used memory", u_bibop, u_alloc, u_big, u_bibop+u_alloc+u_big, 
-	    "free memory", n_bibop, n_alloc, n_big, n_bibop+n_alloc+n_big+p_free*PAGE_SIZE, p_free*PAGE_SIZE, 
+	    "free memory", n_bibop, n_alloc, n_big, n_bibop+n_alloc+n_big+p_free*PAGE_SIZE,
+            " ", p_free*PAGE_SIZE, 
 	    "used blocks", m_bibop-f_bibop, m_alloc-f_alloc, m_big-f_big, m_bibop+m_alloc+m_big-(f_bibop+f_alloc+f_big),
 	    "free blocks", a_bibop, a_alloc, a_big, a_bibop + a_alloc + a_big,
-	    "allocated pages", p_bibop, p_alloc, p_big, p_bibop+p_alloc+p_big+p_free+1, p_free, (p_bibop+p_alloc+p_big+p_free+1)*PAGE_SIZE, PAGE_SIZE,
+	    "allocated pages", p_bibop, p_alloc, p_big, p_bibop+p_alloc+p_big+p_free+1,
+            " ", p_free, (p_bibop+p_alloc+p_big+p_free+1)*PAGE_SIZE, (long long)PAGE_SIZE,
 
 	    "# of malloc()", m_bibop, m_alloc, m_big, m_bibop+m_alloc+m_big,
 	    "# of free()", f_bibop, f_alloc, f_big, f_bibop+f_alloc+f_big,
@@ -976,4 +891,3 @@ sbrk requests: %d %d (a) \n\
 #endif
     return mbuf;
 }
-#endif /* MALLOC_bibop */

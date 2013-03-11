@@ -8,8 +8,8 @@
 
 union u {
     char *string;
-    int number;
-    float real;
+    long long number;
+    double real;
     struct object *ob;
     struct vector *vec;
     struct svalue *lvalue;
@@ -35,7 +35,8 @@ extern struct svalue start_of_stack[];
 #define T_LVALUE	0x1
 #define T_NUMBER	0x2
 #define T_STRING	0x4
-#define T_ARRAY	0x8
+#define T_POINTER	0x8
+#define T_ARRAY		0x8
 #define T_OBJECT	0x10
 #define T_MAPPING	0x20
 #define T_FLOAT         0x40
@@ -46,8 +47,8 @@ extern struct svalue start_of_stack[];
 #define STRING_CSTRING	2	/* Do not has to be freed at all */
 
 struct vector {
-    short size;
-    unsigned short ref;
+    unsigned int size;
+    unsigned int ref;
 #ifdef DEBUG
     int extra_ref;
 #endif
@@ -70,7 +71,7 @@ struct closure {
     struct closure *next;
     struct object *from;
 #endif
-    short ref;			/* reference counter */
+    unsigned int ref;           /* reference counter */
     char funtype;
 #define FUN_LFUN 1
 #define FUN_SFUN 2
@@ -78,6 +79,7 @@ struct closure {
 #define FUN_LFUNO 4
 #define FUN_COMPOSE 5		/* used for compositions */
 #define FUN_EMPTY 6		/* used for empty argument slots */
+#define FUN_LFUN_NOMASK 7       /* used for nomask functions */
     unsigned short funno, funinh; /* function no, and inherit no. used in call */
     struct object *funobj;	/* object where function is, or 0 */
     struct vector *funargs;	/* function arguments, or 0 */
@@ -103,6 +105,11 @@ struct control_stack {
     struct function *funp;	/* Only used for tracebacks */
     int inh_offset;
     char ext_call;
+#if defined(PROFILE_LPC)
+    double startcpu;
+    double frame_cpu;
+    double frame_start;
+#endif
 };
 
 /*
@@ -118,6 +125,19 @@ struct gdexception {
     int			e_catch;
     jmp_buf		e_context;
 };
+
+/*
+ * Boolean Type
+ */
+
+typedef int	bool_t;
+
+#ifndef FALSE
+#define	FALSE	0
+#endif
+#ifndef TRUE
+#define	TRUE	1
+#endif
 
 extern struct gdexception *exception;
 extern struct svalue const0, const1, constempty;
@@ -138,25 +158,10 @@ extern struct control_stack *csp;	/* Points to last element pushed */
 void push_pop_error_context(int push);
 INLINE void pop_stack(void);
 INLINE int search_for_function(char *name, struct program *prog);
-#if defined(RUSAGE) && defined(PROFILE_OBJS)
-void clear_cpu_stack(void);
-#endif
 void free_closure(struct closure *f);
-void push_control_stack(struct function *funp);
+void push_control_stack(struct object*, struct program *, struct function *funp);
 void pop_control_stack(void);
+void push_vector(struct vector*i, bool_t);
 #ifdef DEALLOCATE_MEMORY_AT_SHUTDOWN
 void clear_closure_cache(void);
-#endif
-
-/*
- * Boolean Type
- */
-
-typedef int	bool_t;
-
-#ifndef FALSE
-#define	FALSE	0
-#endif
-#ifndef TRUE
-#define	TRUE	1
 #endif

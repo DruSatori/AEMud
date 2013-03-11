@@ -141,6 +141,10 @@ global_plural_word(struct svalue *fp)
 	    (void)strcat(tmp, "s");
 	break;
     case 'f':
+	if (penultimate == 'f')
+	{
+	    tmp[sl - 2] = '\0';
+	}
 	tmp[sl - 1] = '\0';
 	(void)strcat(tmp, "ves");
 	break;
@@ -176,3 +180,8 @@ struct interface gl_language =
     vars,
     funcs,
 };
+
+
+
+
+

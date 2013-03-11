@@ -23,7 +23,6 @@ destructed_object
 destruct_environment_of
 parse_exception
 valid_resident
-valid_save_binary
 valid_move
 #
 # Interactive admin.
@@ -41,6 +40,7 @@ valid_query_ip_number_name
 #######
 incoming_udp
 incoming_service
+valid_incoming_service
 #
 # Error admin.
 #######

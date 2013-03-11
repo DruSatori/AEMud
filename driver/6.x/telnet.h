@@ -76,15 +76,16 @@ typedef struct {
     void *	t_ip;
     u_int	t_rblen;
     u_int	t_sblen;
+    struct task *task;
 } telnet_t;
 
 /*
  * Telnet Flags.
  */
 #define	TF_ATTACH		0x0001
-#define TF_ENABR		0x0002
-#define TF_ENABW		0x0004
-#define TF_FLOWC		0x0008
+#define TF_INPUT                0x0002
+#define TF_DISCONNECT           0x0004
+
 #define TF_OVFLCANQ		0x0010
 #define TF_OVFLOPTQ		0x0020
 #define	TF_OVFLOUTQ		0x0040
@@ -111,7 +112,7 @@ typedef struct {
 #define	TELOPT_CDM		205
 
 void telnet_detach(telnet_t *);
-void telnet_output(telnet_t *, u_char *);
+int  telnet_output(telnet_t *, u_char *);
 void telnet_enable_echo(telnet_t *);
 void telnet_disable_echo(telnet_t *);
 void telnet_init(u_short);

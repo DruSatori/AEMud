@@ -1,13 +1,11 @@
 NAME
-	pow - return a to the power of b
+        pow - exponential function operating on a float
 
-SYNTAX
-	float log(float a,float b);
+SYNOPSIS
+        float  pow(float x, float e)
 
 DESCRIPTION
-	Return a to the power of b. Can not be written as a^b as that
-	current means 'xor' and only works for integers.
+        pow(x,e) returns the e'th power of x (x^e).
 
 SEE ALSO
-	cos, sin, tan, asin, acos, atan, sqrt, log, exp
-
+        math - for a list of other math functions available.

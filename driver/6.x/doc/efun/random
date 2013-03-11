@@ -12,9 +12,6 @@ DESCRIPTION
 	number will be given. random will always return the same value
 	for a given limit and seed.
 
-SEE ALSO
-	rnd
-
 NOTA BENE
 	The last paragraph is badly tested, please report any bugs found
 

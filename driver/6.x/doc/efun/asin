@@ -1,12 +1,12 @@
 NAME
-	asin - arcus sinus
+        asin - trigonometric function operating on float
 
-SYNTAX
-	float asin(float v);
+SYNOPSIS
+        float   asin(float)
 
 DESCRIPTION
-	Return the arcsine value of v, given in radians.
+        asin() returns the arc-sine of a floating point number.
+        The value returned is in radians.
 
 SEE ALSO
-	cos, sin, tan, acos, atan, sqrt, log, pow, exp
-
+        math - for a list of other math functions available.

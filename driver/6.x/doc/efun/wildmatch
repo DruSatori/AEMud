@@ -12,13 +12,11 @@ DESCRIPTION
 
 	Most characters match only themselves in the pattern,
 	but the following are special:
-		*	- matches any number of any characters.
-		?	- matches any characters.
-		[xyz]	- matches any characters in xyz.
-		[^xyz]	- matches any characters not in xyz.
-		\c	- matches c even if c is special. Notice that within a
-                          string you must use \\ to get a single \ in the
-                          pattern. See the examples.
+		*	- matches any number of any characters
+		?	- matches any characters
+		[xyz]	- matches any characters in xyz
+		[^xyz]	- matches any characters not in xyz
+		\c	- matches c even if c is special
 
 	Examples:
 		wildmatch("*.foo", "bar.foo") == 1
@@ -26,8 +24,6 @@ DESCRIPTION
 		wildmatch("[abc]?*", "axy") == 1
 		wildmatch("[abc]?*", "dxy") == 0
 		wildmatch("[abc]?*", "a") == 0
-                wildmatch("\\*a*", "*abc") == 1
-                wildmatch("\\*a*", "xabc") == 0
 
 SEE ALSO
 	regexp

@@ -10,9 +10,6 @@
  */
 #include "config.h"
 
-#ifdef DO_CLEANUP
-#define O_WILL_CLEAN_UP		0x01  /* clean_up will be called next time */
-#endif
 #define O_CREATED		0x02  /* Has 'create()' been called */
 #define O_ENABLE_COMMANDS	0x04  /* Can it execute commands ? */
 #define O_CLONE			0x08  /* Is it cloned from a master copy ? */
@@ -35,7 +32,9 @@ struct object {
     int swap_num;		/* Swap file offset. -1 is not swapped yet. */
     struct program *prog;
     char *name;
+    struct task *callout_task;
     struct call *call_outs;
+    short num_callouts;
     struct object *next_call_out;
     struct object *next_all, *prev_all, *next_inv, *next_hash;
     struct object *contains;

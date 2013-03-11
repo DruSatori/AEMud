@@ -3,14 +3,6 @@
 #include <string.h>
 #include <ctype.h>
 
-#ifdef VAX_BSD
-char vax_bsd_toupper(char s);
-
-#define xtoupper(s) vax_bsd_toupper(s)
-#else
-#define	xtoupper(s) toupper(s)
-#endif /* VAX_BSD */
-
 int
 main(int argc, char **argv)
 {
@@ -26,7 +18,7 @@ main(int argc, char **argv)
     prefix = argv[1];
     fname = argv[2];
     for (j = 0; prefix[j]; j++)
-	prefix[j] = xtoupper(prefix[j]);
+	prefix[j] = toupper(prefix[j]);
 
     (void)sprintf(name, "%s.h", fname);
     header_file = fopen(name, "w");
@@ -61,7 +53,7 @@ main(int argc, char **argv)
 	
 	(void)fprintf(data_file, "    {\"%s\", 0, 0},\n", func_name);
 	for (j = 0; name[j]; j++)
-	    name[j] = xtoupper(name[j]);
+	    name[j] = toupper(name[j]);
 	(void)fprintf(header_file, "#define %s_%s %d\n", prefix, name, i++);
     }
 
@@ -69,14 +61,3 @@ main(int argc, char **argv)
     exit(0);
     /* NOTREACHED */
 }
-
-#ifdef VAX_BSD
-char
-vax_bsd_toupper(char s)
-{
-    if (s == '_')
-	return s;
-    else
-	return toupper(s);
-}
-#endif /* VAX_BSD */

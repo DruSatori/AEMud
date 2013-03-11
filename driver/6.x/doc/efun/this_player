@@ -12,9 +12,4 @@ DESCRIPTION
 SEE ALSO
 	this_interactive, write, set_this_player, add_action, move_object
 
-NOTA BENE
-        The function this_player() is _not_ guaranteed when called from a
-        function that is called through an alarm. Even though it may well
-        work in some cases, there is no guarantee, and using it anyways may
-        well result in your call going to the wrong player.
 

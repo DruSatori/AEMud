@@ -1,14 +1,8 @@
 NAME
-	sqrt - square root
+	sqrt - give squareroot of a number
 
-SYNTAX
-	float sqrt(float r);
-	or
-	int sqrt(int r);
-
+SYNOPSIS
+	float sqrt(float arg)
+	
 DESCRIPTION
-	Return the square root of r. The second syntax rounds down to an int.
-
-SEE ALSO
-	cos, sin, tan, asin, acos, atan, log, pow, exp
-
+	Returns the squareroot of arg.

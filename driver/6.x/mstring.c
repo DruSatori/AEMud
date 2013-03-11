@@ -40,15 +40,7 @@
 #include "lint.h"
 #include "mstring.h"
 #include "hash.h"
-#ifdef DEBUG
 #include "simulate.h"
-#endif
-
-#ifdef MALLOC_smalloc
-extern int malloc_size_mask(void);
-#else
-#define malloc_size_mask() (~0)
-#endif
 
 int num_distinct_strings_shared;
 long bytes_distinct_strings_shared;
@@ -58,8 +50,8 @@ int num_distinct_strings_malloced;
 long bytes_distinct_strings_malloced;
 long overhead_bytes_malloced;
 
-static int search_len;
-static int num_str_searches;
+static long long search_len;
+static long long num_str_searches;
 static long allocd_bytes_malloced;
 static int allocd_strings_malloced;
 static long allocd_bytes_shared;
@@ -67,17 +59,22 @@ static int allocd_strings_shared;
 
 static char *sstring_table[HTABLE_SIZE];
 
+/* 1 G characters should be big enough */
+#define MAX_STRING_SIZE (1<<30)
+
 char *
 allocate_mstring(size_t len)
 {
     char *cp;
+    if (len < 0 || len > MAX_STRING_SIZE)
+	error("Illegal string size.\n"); 
 
     cp = (char *)xalloc(mstring_header + len + 1) + mstring_header;
 #ifdef DEBUG
     mstring_magic(cp) = MSTRING_MAGIC;
 #endif
     mstring_count(cp) = 1;
-    mstring_len(cp) = (u_short)len;
+    mstring_len(cp) = len;
     allocd_strings_malloced++;
     allocd_bytes_malloced += mstring_header + len + 1;
     num_distinct_strings_malloced++;
@@ -87,7 +84,7 @@ allocate_mstring(size_t len)
 }
 
 char *
-make_mstring(char *cp)
+make_mstring(const char *cp)
 {
     size_t len;
     char *xp;
@@ -103,7 +100,7 @@ reference_mstring(char *cp)
 {
 #ifdef DEBUG
     if (mstring_magic(cp) != MSTRING_MAGIC)
-	fatal("Bad m-magic: %x %x\n", mstring_magic(cp), MSTRING_MAGIC);
+	fatal("Bad m-magic: %lx %x\n", mstring_magic(cp), MSTRING_MAGIC);
 #endif
 
     if (mstring_count(cp) != 0)
@@ -120,7 +117,7 @@ free_mstring(char *cp)
 {
 #ifdef DEBUG
     if (mstring_magic(cp) != MSTRING_MAGIC)
-	fatal("Bad m-magic: %x %x\n", mstring_magic(cp), MSTRING_MAGIC);
+	fatal("Bad m-magic: %lx %x\n", mstring_magic(cp), MSTRING_MAGIC);
 #endif
 
     if (mstring_count(cp) != 0) {
@@ -144,7 +141,7 @@ reference_sstring(char *cp)
 {
 #ifdef DEBUG
     if (sstring_magic(cp) != SSTRING_MAGIC)
-	fatal("Bad s-magic: %x %x\n", sstring_magic(cp), SSTRING_MAGIC);
+	fatal("Bad s-magic: %lx %x\n", sstring_magic(cp), SSTRING_MAGIC);
 #endif
 
     if (sstring_count(cp) != 0)
@@ -159,7 +156,7 @@ reference_sstring(char *cp)
 char *
 find_sstring(char *cp)
 {
-    u_short hash;
+    unsigned short hash;
     char *xp;
 
     hash = HASH_SSTRING(cp);
@@ -170,7 +167,7 @@ find_sstring(char *cp)
 	search_len++;
 #ifdef DEBUG
 	if (sstring_magic(xp) != SSTRING_MAGIC)
-	    fatal("Bad s-magic: %x %x\n", sstring_magic(xp), SSTRING_MAGIC);
+	    fatal("Bad s-magic: %lx %x\n", sstring_magic(xp), SSTRING_MAGIC);
 #endif
 	if (xp == cp || (*xp == *cp && strcmp(xp, cp) == 0))
 	{
@@ -192,10 +189,10 @@ find_sstring(char *cp)
 }
 
 char *
-make_sstring(char *cp)
+make_sstring(const char *cp)
 {
     size_t len;
-    u_short hash;
+    unsigned short hash;
     char *xp;
 
     hash = HASH_SSTRING(cp);
@@ -206,7 +203,7 @@ make_sstring(char *cp)
 	search_len++;
 #ifdef DEBUG
 	if (sstring_magic(xp) != SSTRING_MAGIC)
-	    fatal("Bad s-magic: %x %x\n", sstring_magic(xp), SSTRING_MAGIC);
+	    fatal("Bad s-magic: %lx %x\n", sstring_magic(xp), SSTRING_MAGIC);
 #endif
 	if (xp == cp || (*xp == *cp && strcmp(xp, cp) == 0))
 	{
@@ -224,6 +221,9 @@ make_sstring(char *cp)
 	xp = sstring_next(xp);
     }
     len = strlen(cp);
+    if (len < 0 || len > MAX_STRING_SIZE)
+	error("Illegal string size.\n"); 
+
     xp = (char *)xalloc(sstring_header + len + 1) + sstring_header;
 #ifdef DEBUG
     sstring_magic(xp) = SSTRING_MAGIC;
@@ -234,7 +234,7 @@ make_sstring(char *cp)
 	sstring_prev(sstring_next(xp)) = xp;
     sstring_hash(xp) = hash;
     sstring_count(xp) = 1;
-    sstring_len(xp) = (u_short)len;
+    sstring_len(xp) = len;
     (void)memcpy(xp, cp, len + 1);
     sstring_table[hash] = xp;
     num_distinct_strings_shared++;
@@ -251,7 +251,7 @@ free_sstring(char *cp)
 {
 #ifdef DEBUG
     if (sstring_magic(cp) != SSTRING_MAGIC)
-	fatal("Bad s-magic: %x %x\n", sstring_magic(cp), SSTRING_MAGIC);
+	fatal("Bad s-magic: %lx %x\n", sstring_magic(cp), SSTRING_MAGIC);
 #endif
 
     if (sstring_count(cp) != 0) {
@@ -276,6 +276,28 @@ free_sstring(char *cp)
 	}
     }
 }
+
+char *
+multiply_string(char *str, long long factor)
+{
+    char *result;
+    long long size, newsize, offset;
+
+    if (factor <= 0 || (size = strlen(str)) == 0) {
+	return make_mstring("");
+    }
+
+    if (factor > MAX_STRING_SIZE)
+	error("Illegal string size.\n"); 
+
+    newsize = size * factor;
+    result = allocate_mstring(newsize);
+    for (offset = 0; offset < newsize; offset += size) {
+	strcpy(result + offset, str);
+    }
+    return result;
+}
+
 
 void 
 add_string_status(char *debinf)
@@ -322,11 +344,11 @@ add_string_status(char *debinf)
 	(((double)sum1 * (double)sum1) / HTABLE_SIZE)) / HTABLE_SIZE);
 
     (void)strcat(debinf, "\nShared string hash table:\n");
-    (void)strcat(debinf, "-------------------------\t Strings    Bytes\n");
+    (void)strcat(debinf, "-------------------------     Strings        Bytes\n");
     
-    (void)sprintf(debinf + strlen(debinf), "Total asked for\t\t\t%8d %8ld\n",
+    (void)sprintf(debinf + strlen(debinf), "Total asked for\t\t%12d %12ld\n",
 	    allocd_strings_shared, allocd_bytes_shared);
-    (void)sprintf(debinf + strlen(debinf), "Actually used\t\t\t%8d %8ld\n",
+    (void)sprintf(debinf + strlen(debinf), "Actually used\t\t%12d %12ld\n",
 	    num_distinct_strings_shared,
 	    bytes_distinct_strings_shared + overhead_bytes_shared);
 
@@ -336,25 +358,25 @@ add_string_status(char *debinf)
 	    (double)allocd_bytes_shared);
 
     (void)sprintf(debinf + strlen(debinf),
-	    "Searches     : %9d  Average search: %7.3f\n",
+	    "Searches     : %12lld  Average search: %7.3f\n",
 	    num_str_searches,
 	    (double)search_len / (double)num_str_searches);
 
     (void)sprintf(debinf + strlen(debinf),
-	    "Hash size    :     %5d\n", HTABLE_SIZE);
+	    "Hash size    : %12d\n", HTABLE_SIZE);
     (void)sprintf(debinf + strlen(debinf),
-	    "Minimum depth:     %5d  Average depth : %7.3f\n",
+	    "Minimum depth: %12d  Average depth : %7.3f\n",
 	    min, mean);
     (void)sprintf(debinf + strlen(debinf),
-	    "Maximum depth:     %5d  Std. deviation: %7.3f\n",
+	    "Maximum depth: %12d  Std. deviation: %7.3f\n",
 	    max, stddev);
 
     (void)strcat(debinf, "\nMalloced string table:\n");
-    (void)strcat(debinf, "----------------------\t\t Strings    Bytes\n");
+    (void)strcat(debinf, "----------------------\t     Strings        Bytes\n");
     
-    (void)sprintf(debinf + strlen(debinf), "Total asked for\t\t\t%8d %8ld\n",
+    (void)sprintf(debinf + strlen(debinf), "Total asked for\t\t%12d %12ld\n",
 	    allocd_strings_malloced, allocd_bytes_malloced);
-    (void)sprintf(debinf + strlen(debinf), "Actually used\t\t\t%8d %8ld\n",
+    (void)sprintf(debinf + strlen(debinf), "Actually used\t\t%12d %12ld\n",
 	    num_distinct_strings_malloced,
 	    bytes_distinct_strings_malloced + overhead_bytes_malloced);
 
@@ -379,7 +401,7 @@ dump_sstrings(void)
 	str = sstring_table[i];
 	while (str) {
 	    if (sstring_magic(str) != SSTRING_MAGIC)
-		fatal("Bad s-magic: %x %x\n", sstring_magic(str), SSTRING_MAGIC);
+		fatal("Bad s-magic: %lx %x\n", sstring_magic(str), SSTRING_MAGIC);
 	    len = sstring_len(str);
 	    (void)fwrite(&len, sizeof(len), 1, fp);
 	    (void)fwrite(str, sizeof(char), strlen(str) + 1, fp);

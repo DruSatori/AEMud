@@ -24,7 +24,7 @@ static unsigned char T[] = {
     };
 
 int
-hashstr16(char *s, int maxn)
+hashstr16(const char *s, int maxn)
 {
     register unsigned char *p;
     register unsigned int h1, h2;
@@ -44,7 +44,7 @@ hashstr16(char *s, int maxn)
 }
 
 int
-hashstr(char *s, int maxn, int hashs)
+hashstr(const char *s, int maxn, int hashs)
 /* char *s;     string to hash */
 /* int maxn;    maximum number of chars to consider */
 /* int hashs;   hash table size. */

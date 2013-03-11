@@ -9,14 +9,12 @@
 
 */
 
+#include <alloca.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <ctype.h>
 #include <time.h>
-#if defined(sun) || defined(__osf__)
-#include <alloca.h>
-#endif
 
 #include "config.h"
 #include "lint.h"
@@ -133,7 +131,7 @@ extern int tolower (int);
       * The numberwords below should be replaced for the new language *
 
     static char *ord1[] = {"", "first", "second", "third", "fourth", "fifth",
-			   "sixth", "seventh", "eighth", "nineth", "tenth",
+			   "sixth", "seventh", "eighth", "ninth", "tenth",
 			   "eleventh", "twelfth", "thirteenth", "fourteenth",
 			   "fifteenth", "sixteenth", "seventeenth", 
 			   "eighteenth","nineteenth"};
@@ -314,7 +312,7 @@ load_parse_information()
     /* Get the default ids of 'general references' from master object
     */
     pval = apply_master_ob(M_QGET_ID, 0);
-    if (pval && pval->type == T_ARRAY)
+    if (pval && pval->type == T_POINTER)
     {
 	gId_list_d = pval->u.vec;
 	INCREF(pval->u.vec->ref);	    /* Otherwise next sapply will free it */
@@ -323,7 +321,7 @@ load_parse_information()
 	gId_list_d = 0;
 
     pval = apply_master_ob(M_QGET_PLURID,0);
-    if (pval && pval->type == T_ARRAY)	
+    if (pval && pval->type == T_POINTER)	
     {
 	gPluid_list_d = pval->u.vec;
 	INCREF(pval->u.vec->ref);          /* Otherwise next sapply will free it */
@@ -332,7 +330,7 @@ load_parse_information()
 	gPluid_list_d = 0;
 
     pval = apply_master_ob(M_QGET_ADJID, 0);
-    if (pval && pval->type == T_ARRAY)
+    if (pval && pval->type == T_POINTER)
     {
 	gAdjid_list_d = pval->u.vec;
 	INCREF(pval->u.vec->ref);          /* Otherwise next sapply will free it */
@@ -341,7 +339,7 @@ load_parse_information()
 	gAdjid_list_d = 0;
 
     pval = apply_master_ob(M_QGET_PREPOS,0);
-    if (pval && pval->type == T_ARRAY)
+    if (pval && pval->type == T_POINTER)
     {
 	gPrepos_list = pval->u.vec;
 	INCREF(pval->u.vec->ref);          /* Otherwise next sapply will free it */
@@ -375,7 +373,7 @@ load_lpc_info(int ix, struct object *ob)
     char *str;
     char *parse_to_plural(char *);
     
-    if (!ob || ob->flags & O_DESTRUCTED)
+    if (!ob)
 	return;
     
     if (gPluid_list && 
@@ -384,10 +382,8 @@ load_lpc_info(int ix, struct object *ob)
 	gPluid_list->item[ix].u.number == 0)
     {
 	ret = apply(QGET_PLURID, ob, 0, 1);
-	if (ret && ret->type == T_ARRAY) 
-	{
+	if (ret && ret->type == T_POINTER) 
 	    assign_svalue_no_free(&gPluid_list->item[ix], ret);
-	}
 	else 
 	{
 	    make_plural = 1;
@@ -401,7 +397,7 @@ load_lpc_info(int ix, struct object *ob)
 	gId_list->item[ix].u.number == 0)
     {
 	ret = apply(QGET_ID, ob, 0, 1);
-	if (ret && ret->type == T_ARRAY)
+	if (ret && ret->type == T_POINTER)
 	{
 	    assign_svalue_no_free(&gId_list->item[ix], ret);
 	    if (make_plural)
@@ -421,7 +417,7 @@ load_lpc_info(int ix, struct object *ob)
 			free_mstring(sval.u.string);
 		    }
 		}
-		sval.type = T_ARRAY;
+		sval.type = T_POINTER;
 		sval.u.vec = tmp;
 		assign_svalue_no_free(&gPluid_list->item[ix], &sval);
 		free_svalue(&sval);
@@ -439,7 +435,7 @@ load_lpc_info(int ix, struct object *ob)
 	gAdjid_list->item[ix].u.number == 0)
     {
 	ret = apply(QGET_ADJID, ob, 0, 1);
-	if (ret && ret->type == T_ARRAY)
+	if (ret && ret->type == T_POINTER)
 	    assign_svalue_no_free(&gAdjid_list->item[ix], ret);
 	else
 	    gAdjid_list->item[ix].u.number = 1;
@@ -451,14 +447,19 @@ free_parse_information()
 {
     if (gId_list_d) 
 	free_vector(gId_list_d); 
+    gId_list_d = 0;
     if (gPluid_list_d) 
 	free_vector(gPluid_list_d); 
+    gPluid_list_d = 0;
     if (gAdjid_list_d) 
 	free_vector(gAdjid_list_d);
+    gAdjid_list_d = 0;
     if (gPrepos_list) 
 	free_vector(gPrepos_list);
+    gPrepos_list = 0;
     if (gAllword)
 	free(gAllword);
+    gAllword = 0;
 }
 
 /* Main function, called from interpret.c
@@ -521,7 +522,7 @@ parse (char *cmd, struct svalue *ob_or_array, char *pattern,
     INCREF(wvec->ref); 		/* Do not lose these arrays */
     INCREF(patvec->ref);
 
-    if (ob_or_array->type == T_ARRAY)
+    if (ob_or_array->type == T_POINTER)
 	obvec = ob_or_array->u.vec;
     else if (ob_or_array->type == T_OBJECT)
 	obvec = deep_inventory(ob_or_array->u.ob, 1); /* 1 == ob + deepinv */
@@ -531,7 +532,7 @@ parse (char *cmd, struct svalue *ob_or_array, char *pattern,
 	error("Bad second argument to parse_command()\n");
     }
 
-    tmp.type = T_ARRAY;
+    tmp.type = T_POINTER;
     tmp.u.vec = obvec;
     check_for_destr(&tmp);
 
@@ -544,7 +545,7 @@ parse (char *cmd, struct svalue *ob_or_array, char *pattern,
     old_adjid   = gAdjid_list;
 
     gId_list    = allocate_array(obvec->size);
-    gPluid_list = allocate_array(obvec->size);
+    gPluid_list  = allocate_array(obvec->size);
     gAdjid_list = allocate_array(obvec->size);
     
     /* Loop through the pattern. Handle %s but not '/'
@@ -630,6 +631,7 @@ parse (char *cmd, struct svalue *ob_or_array, char *pattern,
 		}
 	    }
 	}
+
 	else if (!EQ(patvec->item[pix].u.string,"/"))
 	{
 	    /* The pattern was not %s, parse the pattern if
@@ -738,9 +740,8 @@ slice_words(struct vector *wvec, int from, int to)
     if (tx)
     {
 	stmp.type = T_STRING;
-	stmp.string_type = STRING_SSTRING;
-	stmp.u.string = make_sstring(tx);
-	free(tx);
+	stmp.string_type = STRING_MSTRING;
+	stmp.u.string = tx;
     }
     else
     {
@@ -840,14 +841,14 @@ one_parse(struct vector *obvec, char *pat, struct vector *wvec, int *cix_in,
 	  int *fail, struct svalue *prep_param)
 {
     char ch;
-    struct svalue *pval;
+    struct svalue	*pval;
     static struct svalue stmp = { T_NUMBER };
-    char *str1, *str2;
-    struct svalue *item_parse(struct vector *, struct vector *, int *, int *);
-    struct svalue *living_parse(struct vector *, struct vector *, int *, int *);
-    struct svalue *single_parse(struct vector *, struct vector *, int *, int *);
-    struct svalue *prepos_parse(struct vector *, int *, int *, struct svalue *);
-    struct svalue *number_parse(struct vector *, int *, int *);
+    char		*str1, *str2;
+    struct svalue	*item_parse(struct vector *, struct vector *, int *, int *);
+    struct svalue	*living_parse(struct vector *, struct vector *, int *, int *);
+    struct svalue	*single_parse(struct vector *, struct vector *, int *, int *);
+    struct svalue	*prepos_parse(struct vector *, int *, int *, struct svalue *);
+    struct svalue	*number_parse(struct vector *, int *, int *);
 
     /*
 	Fail if we have a pattern left but no words to parse
@@ -938,7 +939,7 @@ one_parse(struct vector *obvec, char *pat, struct vector *wvec, int *cix_in,
 #ifndef PARSE_FOREIGN
 
     static char *ord1[] = {"", "first", "second", "third", "fourth", "fifth",
-			   "sixth", "seventh", "eighth", "nineth", "tenth",
+			   "sixth", "seventh", "eighth", "ninth", "tenth",
 			   "eleventh", "twelfth", "thirteenth", "fourteenth",
 			   "fifteenth", "sixteenth", "seventeenth", 
 			   "eighteenth","nineteenth"};
@@ -975,13 +976,14 @@ one_parse(struct vector *obvec, char *pat, struct vector *wvec, int *cix_in,
 struct svalue *
 number_parse(struct vector *wvec, int *cix_in, int *fail)
 {
-    int cix, ten, ones, num;
+    int cix, ten, ones;
+    long long num;
     char buf[100];
     static struct svalue stmp;	/* No need to free, only numbers */
 
     cix = *cix_in; *fail = 0;
 
-    if (sscanf(wvec->item[cix].u.string, "%d", &num))
+    if (sscanf(wvec->item[cix].u.string, "%lld", &num))
     {
 	if (num > 0)
 	{
@@ -1126,7 +1128,7 @@ item_parse(struct vector *obvec, struct vector *wvec, int *cix_in, int *fail)
     /* stmp is static, and may contain old info that must be freed 
     */
     free_svalue(&stmp);
-    stmp.type = T_ARRAY;
+    stmp.type = T_POINTER;
     stmp.u.vec = ret;
     return &stmp;
 }
@@ -1256,7 +1258,7 @@ prepos_parse(struct vector *wvec, int *cix_in, int *fail,
     char *tmp;
     int pix, tix;
     
-    if ((!prepos) || (prepos->type != T_ARRAY))
+    if ((!prepos) || (prepos->type != T_POINTER))
     {
 	pvec = gPrepos_list;
     }
@@ -1356,7 +1358,7 @@ match_object(int obix, struct vector *wvec, int *cix_in, int *plur)
 	case 1:
 	    if (!gId_list || 
 		gId_list->size <= obix || 
-		gId_list->item[obix].type != T_ARRAY)
+		gId_list->item[obix].type != T_POINTER)
 		continue;
 	    ids = gId_list->item[obix].u.vec;
 	    break;
@@ -1370,7 +1372,7 @@ match_object(int obix, struct vector *wvec, int *cix_in, int *plur)
 	case 3:
 	    if (!gPluid_list || 
 		gPluid_list->size <= obix || 
-		gPluid_list->item[obix].type != T_ARRAY)
+		gPluid_list->item[obix].type != T_POINTER)
 		continue;
 	    ids = gPluid_list->item[obix].u.vec;
 	    break;
@@ -1498,7 +1500,7 @@ check_adjectiv(int obix, struct vector *wvec, int from, int to)
     struct vector *ids;
     int member_string(char *, struct vector *);
 
-    if (gAdjid_list->item[obix].type == T_ARRAY)
+    if (gAdjid_list->item[obix].type == T_POINTER)
 	ids = gAdjid_list->item[obix].u.vec;
     else
 	ids = 0;
@@ -1651,9 +1653,7 @@ parse_to_plural(char *str)
 	free_vector(words);
 	return make_mstring(str);
     }
-    spl = implode_string(words, " ");
-    str = make_mstring(spl);
-    free(spl);
+    str = implode_string(words, " ");
     free_vector(words);
     return str;
 }
@@ -1762,8 +1762,8 @@ process_string(char *str, int other_ob)
     char *p2, *p3, *buf;
     char *process_part(char *, int);
 
-    if (str == NULL || strchr(str,'@') == NULL)
-	return str;
+    if (str == NULL || strstr(str,"@@") == NULL)
+	return 0;
 
     /* This means we are called from notify_ in comm1 
        We must temporary set eff_user to backbone uid for
@@ -1816,7 +1816,7 @@ process_string(char *str, int other_ob)
     if (changed)
 	buf = implode_string(vec, "");
     else
-	buf = str;
+	buf = 0;
 
     free_vector(vec);
 
@@ -1910,7 +1910,7 @@ process_value(char *str, int other_ob)
 
 	if (!vbfc_object)
 	    error("No vbfc object.\n");
-	push_control_stack(0);
+	push_control_stack(vbfc_object, vbfc_object->prog, 0);
 	current_prog = vbfc_object->prog;
 	pc = vbfc_object->prog->program;	/* XXX */
 	inh_offset = current_prog->num_inherited;

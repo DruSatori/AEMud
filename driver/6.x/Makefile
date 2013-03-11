@@ -1,6 +1,3 @@
-# This line is needed on some machines. 
-MAKE=make
-
 # Set MUD_LIB to the directory which contains the mud data. Was formerly
 # defined in config.h !
 MUD_LIB = /Library/AncientEmpires/lib
@@ -14,61 +11,9 @@ BINDIR = /Library/AncientEmpires/bin
 ISRC= clib/efun.c clib/stdobject.c clib/gl_language.c
 IOBJ= clib/efun.o clib/stdobject.o clib/gl_language.o
 
-# List of objects that might not exist in your standard library
-# Select from: drand48.[co], strerror.[co], strpbrk.[co], strtod.[co],
-#              snprintf.[co], vprintf.[co]
-#MISSING_SRC=drand48.c
-#MISSING_OBJ=drand48.o
-
-# Chose one of these mallocs:
-# This is the standard malloc for the CD gamedriver. It is quite fast
-# and has a very small memory overhead.
-#MALLOC=bibopmalloc
-
-# This is the old standard mud malloc. It's a bit faster that bibopmalloc
-# but uses more memory.
-#MALLOC=smalloc
-
-# A variant of smalloc for debug purposes
-#MALLOC=debugmalloc
-#DEBUG_MALLOC=-DDEBUG_MALLOC
-
-# Gnu malloc, fastest but uses most memory.
-#MALLOC=gmalloc
-
-# Use the standard malloc on your system:
-MALLOC=sysmalloc
-
-# Another debug allocator
-#MALLOC=dmalloc
-
-# Define what random number generator to use.
-# If no one is specified, a guaranteed bad one will be used.
-#
-RAND=RANDOM
-#RAND=DRAND48
-
-# Select a parser generator among the following:
-# The Berkely yacc. Produces the best code. Is available for anonymous ftp.
-#YACC=byacc
-
-# Bison from the FSF. Produces good code. Is available for anonymous ftp.
-#YACC=bison -y
-
-# Standard yacc. Should be available on any Unix system worth its salt.
-# WARNING: This will probably not work on all systems!
-YACC=yacc
-
-# If you don't have 'strchr', then add next flag to CFLAGS.
-# -Dstrchr=index -Dstrrchr=rindex
-#
-PROFIL=
-#PROFIL=-p -DMARK
-#PROFIL=-pg
-#PROFIL=-pg -non_shared
 #Enable warnings from the compiler, if wanted.
-#WARN=-Wall -Wshadow -Wstrict-prototypes
-WARN=
+WARN=-Wall -Wformat=2
+
 #
 # Enable run time debugging. It will use more time and space.
 # When the flag is changed, be sure to recompile everything.
@@ -82,76 +27,12 @@ DEBUG=
 #
 #
 
-# System dependent flags
-# VAX BSD gcc
-#SYS_CFLAGS=-DVAX_BSD
-#SYS_OPT=-g -O2
-#SYS_LIBS=
-#ULIBS=
-#LINTFILTER=sedf.sun
-
-# OpenBSD (All platforms)
-#SYS_CFLAGS=
-#SYS_OPT=-g -O3
-#SYS_LIBS=
-#CC=gcc
-#ULIBS=
-#LINTFILTER=sedf.sun
-
-# Mac OS X
 SYS_CFLAGS=-pipe -D__FreeBSD__ -D__OpenBSD__
-SYS_OPT=-g -O2
+SYS_OPT=-std=gnu99 -O3 -fgnu89-inline
 SYS_LIBS=-lcrypto
 CC=gcc
-ULIBS=
-LINTFILTER=sedf.sun
 
-# Linux
-#  Some versions might require -lcrypt added to SYS_LIBS
-#SYS_CFLAGS=-pipe -D__USE_BSD_SIGNAL -Dlinux
-#SYS_OPT=-g
-#SYS_LIBS=-lcrypt
-#CC=gcc
-#ULIBS=
-#LINTFILTER=sedf.sun
-
-# BSD/OS 2.x, 3.x and 4.x
-#SYS_CFLAGS=-pipe
-#SYS_OPT=-g -O2
-#SYS_LIBS=
-#CC=gcc
-#ULIBS=
-#LINTFILTER=sedf.sun
-
-# SunOS 4 gcc
-#SYS_CFLAGS=
-#SYS_OPT=-g -O2
-#SYS_LIBS=
-#CC=gcc
-#ULIBS=-lresolv
-#LINTFILTER=sedf.sun
-
-# SunOS 5 gcc
-#SYS_CFLAGS=-pipe -DSOLARIS
-#SYS_OPT=-g -O2
-#SYS_LIBS=-lsocket -lnsl
-#CC=purify cc  -DSOLARIS
-#CC=gcc -DSOLARIS -g
-#CC=gcc -O -Wall -g
-#ULIBS=-lresolv -lsocket -lnsl
-#LINTFILTER=sedf.sysv
-
-# DEC Alpha cc
-#SYS_CFLAGS=
-#SYS_OPT=-g3 -O2 -Olimit 3000
-#SYS_LIB=
-#CC=cc
-#ULIBS=
-#LINTFILTER=sedf.sun
-
-CFLAGS +=  $(SYS_CFLAGS) $(SYS_OPT) -DWORD_WRAP -D$(RAND) -DMALLOC_$(MALLOC) \
- $(WARN) $(DEBUG) $(DEBUG_MALLOC)
-LINTFLAGS=	$(CFLAGS)
+CFLAGS=  $(SYS_CFLAGS) $(SYS_OPT) $(WARN) $(DEBUG) 
 
 #
 # Add extra libraries here.
@@ -159,27 +40,106 @@ LINTFLAGS=	$(CFLAGS)
 LIBS= -lm $(SYS_LIBS)
 MFLAGS = "BINDIR=$(BINDIR)" "MUD_LIB=$(MUD_LIB)"
 
-driver: DUMMY
-	$(MAKE) -f Makefile.distrib "CC=$(CC)" "CFLAGS=$(CFLAGS) $(PROFIL)" "YACC=$(YACC)" "LIBS=$(LIBS)" "ISRC=$(ISRC)" "IOBJ=$(IOBJ)" "MALLOC=$(MALLOC)" "MUD_LIB=$(MUD_LIB)" "BINDIR=$(BINDIR)" "MISSING_SRC=$(MISSING_SRC)" "MISSING_OBJ=$(MISSING_OBJ)" $@
-
+all: driver
 
 install.utils:
-	(cd util;\
-	$(MAKE) $(MFLAGS) "CC=$(CC)" "CFLAGS=$(CFLAGS)" "LIBS=$(ULIBS)" install)
+	make -C util install
 
 utils:	
-	(cd util;\
-	$(MAKE) $(MFLAGS) "CC=$(CC)" "CFLAGS=$(CFLAGS)" "LIBS=$(ULIBS)")
-
-install:
-	-$(MAKE) -f Makefile.distrib "BINDIR=$(BINDIR)" $@
+	make -C util
 
 tags:	TAGS
 
-clean depend lint TAGS:
-	-$(MAKE) -f Makefile.distrib "CC=$(CC)" "CFLAGS=$(CFLAGS)" "LINTFLAGS=$(LINTFLAGS)" "LINTFILTER=$(LINTFILTER)" "YACC=$(YACC)" "LIBS=$(LIBS)" "ISRC=$(ISRC)" "MALLOC=$(MALLOC)" "MUD_LIB=$(MUD_LIB)" "MISSING_SRC=$(MISSING_SRC)" $@
+# This line is needed on some machines.
+MAKE=make
+
+SRC=array.c backend.c call_out.c comm1.c debug.c ed.c hash.c \
+    hname.c interface.c interpret.c lex.c main.c mapping.c mstring.c \
+    mudstat.c ndesc.c net.c nqueue.c object.c otable.c parse.c port.c regexp.c \
+    signals.c simulate.c simul_efun.c sprintf.c super_snoop.c \
+    tcpsvc.c telnet.c udpsvc.c wildmat.c stdmalloc.c
+
+CSRC=${SRC} lang.c
+
+HEADERS=comm.h config.h exec.h incralloc.h inline_eqs.h inline_svalue.h \
+	instrs.h interface.h interpret.h mapping.h master.h master.t \
+	mstring.h mudstat.h net.h object.h patchlevel.h regexp.h sent.h \
+	backend.h bibopmalloc.h
+
+OBJ=array.o backend.o call_out.o comm1.o debug.o ed.o hash.o \
+    hname.o interface.o interpret.o lex.o main.o mapping.o mstring.o \
+    mudstat.o ndesc.o net.o nqueue.o object.o otable.o parse.o port.o regexp.o \
+    signals.o simulate.o simul_efun.o sprintf.o super_snoop.o \
+    tcpsvc.o telnet.o udpsvc.o wildmat.o stdmalloc.o
+
+MPATH=-DMUD_LIB=\"$(MUD_LIB)\"
+BINPATH=-DBINDIR=\"$(BINDIR)\"
+
+.c.o:
+	$(CC) $(CFLAGS) $(MPATH) $(BINPATH) -o $@ -c $<
+
+driver: $(OBJ) lang.o ${IOBJ}
+	$(CC) $(CFLAGS) $(OBJ) lang.o ${IOBJ} -o driver $(LIBS)
+
+func_spec.i: func_spec.c
+	$(CC) -E $(CFLAGS) func_spec.c > func_spec.i
+
+master.t master.h: master.n genfkntab
+	./genfkntab m master <master.n
+
+make_func.c: make_func.y
+	bison -y -o make_func.c make_func.y
+
+genfkntab: genfkntab.o
+	$(CC) genfkntab.o -o genfkntab
+
+make_func: make_func.o
+	$(CC) make_func.o -o make_func
+
+make_table: make_table.o
+	$(CC) make_table.o -o make_table
+
+efun_table.h: lang.h make_table
+	./make_table lang.h efun_table.h
+
+lang.y efun_defs.c: func_spec.i make_func prelang.y postlang.y config.h
+	./make_func > tmp_efun_defs
+	sed -e "s/,,/,T_STRING|T_NUMBER|T_POINTER|T_OBJECT|T_MAPPING|T_FLOAT|T_FUNCTION,/" tmp_efun_defs > efun_defs.c
+	rm tmp_efun_defs
+
+lang.c lang.h: lang.y
+	bison -y -o lang.c -d lang.y
+
+install:
+	-mv $(BINDIR)/driver $(BINDIR)/driver.old
+	-cp driver $(BINDIR)/driver
 
 check:
-	-$(MAKE) -f Makefile.distrib $@
+	sh regress.sh
 
-DUMMY:
+clean:
+	-rm -f *.o lang.h lang.c lexical.c mon.out *.ln tags
+	-rm -f parse core TAGS 
+	-rm -f config.status lpmud.log
+	-rm -f clib/*.o
+	-rm -f driver driver.old
+	-rm -f efun_defs.c efun_table.h
+	-rm -f lang.y
+	-rm -f make_func make_func.c make_table func_spec.i
+	-rm -f master.h master.t genfkntab
+	(cd util ; echo "Cleaning in util." ; $(MAKE) clean)
+
+tags: $(SRC)
+	ctags prelang.y postlang.y $(SRC)
+
+TAGS: $(SRC) $(HEADERS)
+	etags -t prelang.y postlang.y $(SRC) $(HEADERS)
+
+depend: Makefile.depend
+
+Makefile.depend: $(SRC) ${ISRC} make_func.c master.h lang.h efun_table.h prelang.y
+	$(CC) -MM ${SRC} ${ISRC} make_func.c > Makefile.depend
+	$(CC) -MM -MT lang.o -x c prelang.y| sed 's/prelang\.y/lang.c/' >>Makefile.depend
+
+include Makefile.depend
+

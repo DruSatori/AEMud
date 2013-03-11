@@ -1,12 +1,12 @@
 NAME
-	sin - sinus
+        sin - trigonometric function operating on a float
 
-SYNTAX
-	float sin(float rad);
+SYNOPSIS
+        float  sin(float)
 
 DESCRIPTION
-	Return the sinus value of rad. rad is given in radians.
+        sin() returns the sine of a floating point number.
+        The input value is in radians.
 
 SEE ALSO
-	cos, tan, asin, acos, atan, sqrt, log, pow, exp
-
+        math - for a list of other math functions available.

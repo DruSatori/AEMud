@@ -14,15 +14,10 @@
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
-#if defined(_SEQUENT_)
-#include <malloc.h>
-#endif
+#include <limits.h>
 #include <memory.h>
 #include <sys/types.h>
 #include <sys/stat.h>
-#if defined(sun) || defined(__osf__)
-#include <alloca.h>
-#endif
 
 #include "config.h"
 #include "lint.h"
@@ -32,24 +27,17 @@
 #include "incralloc.h"
 #include "mstring.h"
 #include "simulate.h"
-
+#include "backend.h"
+#include "lex.h"
 #include "efun_table.h"
-
-#if defined(sun) && !defined(SOLARIS)
-void bcopy(char *, char *, int);
-#endif
 
 /* This is to see to it that we always go through xalloc() in main.c
    even from within the yacc-parser
 */
-#ifdef MALLOC_dmalloc
-#include <dmalloc.h>
-#else
 #ifdef malloc
 #undef malloc
 #endif
 #define malloc xalloc
-#endif /* MALLOC_dmalloc */
 
 #define YYMAXDEPTH	600
 
@@ -57,7 +45,7 @@ void bcopy(char *, char *, int);
 #define BREAK_FROM_CASE		0x80000
 
 /* make shure that this struct has a size that is a power of two */
-struct case_heap_entry { int key; short addr; short line; };
+struct case_heap_entry { long long key; short addr; short line; };
 #define CASE_HEAP_ENTRY_ALIGN(offset) offset &= -sizeof(struct case_heap_entry)
 
 static struct mem_block mem_block[NUMAREAS];
@@ -93,9 +81,7 @@ extern int pragma_save_binary;	/* Save this in the binary shadow dir */
 extern int pragma_no_inherit;
 extern int pragma_no_shadow;
 extern int pragma_no_clone;
-#ifdef USE_AUTO_OBJ
 extern struct object *auto_ob;
-#endif
 
 static int true_varargs;
 
@@ -109,6 +95,7 @@ static int current_continue_address;
 static int current_case_address;
 static int current_case_number_heap;
 static int current_case_string_heap;
+static int try_level, break_try_level, continue_try_level;
 #define SOME_NUMERIC_CASE_LABELS 0x40000
 #define NO_STRING_CASE_LABELS    0x80000
 static int zero_case_label;
@@ -155,14 +142,15 @@ void end_lineno_info(void);
 static void push_init_arg_address (int);
 static void clear_init_arg_stack (void);
 void free_all_local_names (void);
+int lookup_local_name(char *);
 int add_local_name (char *, int);
 void smart_log (char *, int, char *);
 extern int yylex (void);
 void type_error (char *, int);
-char *tmpstring_copy(char *);
-char *inner_get_srccode_position(int offset, char *line_numbers, int lineno_size,
-		     char *include_files, char *name);
+char *inner_get_srccode_position(int code, struct lineno *lineno, int lineno_count,
+    char *inc_files, char *name);
 int search_for_function(char *name, struct program *prog);
+int handle_include(char *name, int ignore_errors);
 
 INLINE static unsigned mem_block_size(int, int);
 
@@ -177,10 +165,11 @@ extern char *current_file, *inherit_file;
 /*
  * The names and types of arguments and auto variables.
  */
-unsigned short type_of_locals[MAX_LOCAL];
-int local_blockdepth[MAX_LOCAL];
-char *local_names[MAX_LOCAL];
-int current_number_of_locals = 0;
+static unsigned short type_of_locals[MAX_LOCAL];
+static int local_blockdepth[MAX_LOCAL];
+static char *local_names[MAX_LOCAL];
+static int current_number_of_locals = 0;
+static int max_number_of_locals = 0;
 
 /*
  * The types of arguments when calling functions must be saved,
@@ -244,6 +233,14 @@ pop_arg_stack(int n)
     type_of_arguments.current_size -= sizeof (unsigned short) * n;
 }
 
+/* Get a pointer to first argument when there are 'n' arguments in total. */
+INLINE
+static unsigned short*
+get_argument_ptr(int n)
+{
+  return &((unsigned short *)
+	   (type_of_arguments.block + type_of_arguments.current_size))[-n];
+}
 /*
  * Get type of argument number 'arg', where there are
  * 'n' arguments in total in this function call. Argument
@@ -285,6 +282,12 @@ ins_byte(char b)
     add_to_mem_block(A_PROGRAM, &b, 1);
 }
 
+static INLINE void 
+upd_byte(int offset, char l)
+{
+    mem_block[A_PROGRAM].block[offset] = l;
+}
+
 static INLINE char
 read_byte(int offset)
 {
@@ -320,6 +323,12 @@ read_short(int offset)
     return l;
 }
 
+static INLINE void
+ins_mem(void *data, size_t n)
+{
+   add_to_mem_block(A_PROGRAM, data, n);
+}
+
 /*
  * Store a 4 byte number. It is stored in such a way as to be sure
  * that correct byte order is used, regardless of machine architecture.
@@ -331,6 +340,12 @@ ins_long(int l)
     add_to_mem_block(A_PROGRAM, (char *)&l+1, 1);
     add_to_mem_block(A_PROGRAM, (char *)&l+2, 1);
     add_to_mem_block(A_PROGRAM, (char *)&l+3, 1);
+}
+
+static INLINE void
+ins_long_long(long long ll)
+{
+    ins_mem(&ll, sizeof(ll));
 }
 
 /*
@@ -346,13 +361,14 @@ defined_function(char *s)
     char *sub_name;
     char *real_name;
     char *search;
-    
+
     real_name = strrchr(s, ':') + 1;
     sub_name = strchr(s, ':') + 2;
     
     real_name = (find_sstring((real_name == (char *)1) ? s : real_name));
-    if(!real_name)
+    if(!real_name) {
         return 0;
+    }
     if (sub_name == (char *)2)
 	for (offset = 0; offset < mem_block[A_FUNCTIONS].current_size;
 	     offset += sizeof (struct function)) 
@@ -386,16 +402,16 @@ defined_function(char *s)
 	*/
 
     for (inh = mem_block[A_INHERITS].current_size / sizeof (struct inherit) - 1;
-          inh >= 0; inh -= ((struct inherit *)mem_block[A_INHERITS].block)[inh].prog->
+          inh >= 0; inh -= ((struct inherit *)(mem_block[A_INHERITS].block))[inh].prog->
 	 num_inherited)
     {
 	if (super_name &&
-	    strcmp(super_name, ((struct inherit *)mem_block[A_INHERITS].block)[inh].name) == 0)
+	    strcmp(super_name, ((struct inherit *)(mem_block[A_INHERITS].block))[inh].name) == 0)
 	    search = sub_name;
 	else
 	    search = s;
         if (search_for_ext_function (search,
-	    ((struct inherit *)mem_block[A_INHERITS].block)[inh].prog))
+	    ((struct inherit *)(mem_block[A_INHERITS].block))[inh].prog))
 	{
 	    /* Adjust for inherit-type */
 	    int type = ((struct inherit *)mem_block[A_INHERITS].block)[inh].type;
@@ -407,7 +423,7 @@ defined_function(char *s)
             function_type_mod_found |= type & TYPE_MOD_MASK;
 
 	    function_inherit_found += inh -
-		(((struct inherit *)mem_block[A_INHERITS].block)[inh].prog->
+		(((struct inherit *)(mem_block[A_INHERITS].block))[inh].prog->
 		 num_inherited - 1);
 	    
 	    return 1;
@@ -432,6 +448,12 @@ push_address()
 	return;
     }
     comp_stack[comp_stackp++] = mem_block[A_PROGRAM].current_size;
+}
+
+static INLINE int
+get_address(void)
+{
+    return mem_block[A_PROGRAM].current_size;
 }
 
 static INLINE void 
@@ -561,27 +583,20 @@ define_new_function(char *name, char num_arg, unsigned char num_local,
 	 */
 	if (function_prog_found) {
 	    funp = &fun;
-#ifdef PURIFY
-	    (void)memset(funp, '\0', sizeof(fun));
-#endif
 	}
     }
     else { /* Function was not defined before, we need a new definition */
         funp = &fun;
-#ifdef PURIFY
-	(void)memset(funp, '\0', sizeof(fun));
-#endif
     }
 
-#ifdef PROFILE_FUNS
+#ifdef PROFILE_LPC
     funp->num_calls = 0;
     funp->time_spent = 0;
-#ifdef SOLARIS
-    funp->ticks_call = 0;
-#else
-    funp->stime_call = 0;
-    funp->utime_call = 0;
-#endif
+    funp->tot_time_spent = 0;
+    funp->avg_calls = 0;
+    funp->avg_time = 0;
+    funp->avg_tot_time = 0;
+    funp->last_call_update = 0;
 #endif
     funp->offset = offset;
     funp->type_flags = type_flags;
@@ -647,9 +662,6 @@ define_variable(char *name, int type)
 	yyerror(p);
     }
 
-#ifdef PURIFY
-    (void)memset(&dummy, '\0', sizeof(dummy));
-#endif
     dummy.name = make_sstring(name);
     dummy.type = type;
     variable_index_found = mem_block_size(A_VARIABLES,sizeof(struct variable));
@@ -738,7 +750,7 @@ set_label(int lbl, unsigned short addr)
 }
 
 
-static INLINE int cmp_case_keys(struct case_heap_entry *entry1,
+static INLINE long long cmp_case_keys(struct case_heap_entry *entry1,
 				struct case_heap_entry *entry2, int is_str)
 {
     if (is_str)
@@ -823,13 +835,8 @@ add_to_case_heap(int block_index, struct case_heap_entry *entry,
     
     if (heap_entry != heap_top)
     {
-#if defined(sun) && !defined(SOLARIS)
-	(void)bcopy(mem_block[block_index].block + from,
-		    mem_block[block_index].block + to, size);
-#else
 	(void)memmove(mem_block[block_index].block + to,
 		      mem_block[block_index].block + from, (size_t)size);
-#endif
 	(void)memcpy(mem_block[block_index].block + from, entry, sizeof(*entry));
 	if (entry2)
 	    (void)memcpy(mem_block[block_index].block + from + sizeof(*entry),
@@ -884,7 +891,7 @@ void
 dump_init_arg_table(int arg)
 {
     int i;
-#if defined(DEBUG) || defined(lint)
+#if defined(DEBUG)
     if (num_parse_error == 0 && init_arg_stack_index != arg)
 	fatal("Not correct number of init addresses!\n");
 #endif
@@ -900,7 +907,6 @@ dump_init_arg_table(int arg)
  */
 %token F_EXT F_JUMP F_JUMP_WHEN_ZERO F_JUMP_WHEN_NON_ZERO F_SKIP_NZ
 %token F_POP_VALUE F_DUP
-%token F_STORE 
 %token F_CALL_NON_VIRT F_CALL_VIRT
 %token F_PUSH_IDENTIFIER_LVALUE F_PUSH_LOCAL_VARIABLE_LVALUE
 %token F_PUSH_INDEXED_LVALUE F_INDIRECT F_INDEX
@@ -910,27 +916,22 @@ dump_init_arg_table(int arg)
  * These are the predefined functions that can be accessed from LPC.
  */
 
-%token F_IF F_IDENTIFIER F_LAND F_LOR F_STATUS
+%token F_IDENTIFIER
 %token F_RETURN F_STRING F_FLOATC
 %token F_INC F_DEC
-%token F_POST_INC F_POST_DEC F_COMMA
-%token F_NUMBER F_ASSIGN F_INT F_ADD F_SUBTRACT F_MULTIPLY
+%token F_POST_INC F_POST_DEC
+%token F_NUMBER F_ASSIGN F_ADD F_SUBTRACT F_MULTIPLY
 %token F_DIVIDE F_LT F_GT F_EQ F_GE F_LE
 %token F_NE
 %token F_ADD_EQ F_SUB_EQ F_DIV_EQ F_MULT_EQ
 %token F_NEGATE
-%token F_SUBSCRIPT F_WHILE F_BREAK
-%token F_DO F_FOR F_SWITCH
+%token F_SWITCH
 %token F_SSCANF F_PARSE_COMMAND F_STRING_DECL F_LOCAL_NAME
-%right F_ELSE
-%token F_DESCRIBE
-%token F_CONTINUE
-%token F_MOD F_MOD_EQ F_INHERIT F_COLON_COLON
+%token F_MOD F_MOD_EQ
 %token F_STATIC
 %token F_ARROW F_AGGREGATE F_M_AGGREGATE
 %token F_COMPL F_AND F_AND_EQ F_OR F_OR_EQ F_XOR F_XOR_EQ
-%token F_LSH F_LSH_EQ F_RSH F_RSH_EQ
+%token F_LSH F_LSH_EQ F_RSH F_RSH_EQ F_NOT
+%token F_TRY F_END_TRY F_FOREACH F_FOREACH_M
 %token F_CATCH F_END_CATCH F_CALL_C F_CALL_SIMUL
-%token F_OBJECT F_VOID F_MIXED F_PRIVATE F_NO_MASK F_NOT F_MAPPING F_FLOAT
-%token F_PUBLIC F_FUNCTION F_OPERATOR
-%token F_VARARGS F_RANGE F_VARARG
+%token F_RANGE F_THROW

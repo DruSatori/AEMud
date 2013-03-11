@@ -10,28 +10,17 @@
 
 #include "config.h"
 
-float	abs(float);
+mixed	abs(float|int);
 float	acos(float);
-#ifndef _SEQUENT_
 float	acosh(float);
-#endif /* !_SEQUENT */
 void	add_action(string|function, void|string, void|int);
 object	*all_inventory(object default: F_THIS_OBJECT);
 mixed	*allocate(int);
-int	arrayp(mixed);
-int	pointerp(mixed);
 float	asin(float);
-#ifndef _SEQUENT_
 float	asinh(float);
-#endif /* !_SEQUENT */
 float	atan(float);
 float	atan2(float, float);
-#ifndef _SEQUENT_
 float	atanh(float);
-#endif /* !_SEQUENT */
-#ifdef DEBUG
-void	break_point();
-#endif /* DEBUG */
 string	break_string(int|string, void|int, void|int|string, void|int);
 mixed	call_other(mapping|object|string|int|object *, string, ...);
 mixed	call_otherv(mapping|object|string|int|object *, string, mixed *);
@@ -75,9 +64,10 @@ string	function_exists(string, object default: F_THIS_OBJECT);
 string	function_name(function);
 object	function_object(function);
 int	functionp(mixed);
+float 	gettimeofday();
 mixed   *get_alarm(int);
 mixed   *get_all_alarms();
-string	*get_dir(string, int default: F_CONST0);
+string	*get_dir(string);
 string	implode(int|string *, string);
 void	input_to(string|function, ...);
 int	intp(mixed);
@@ -87,7 +77,7 @@ int	living(object|int);
 float	log(float);
 string	lower_case(int|string);
 mapping	m_delete(int|mapping, mixed);
-mixed	*m_indices(int|mapping);
+void	m_delkey(mapping, mixed);
 mixed	*m_indexes(int|mapping);
 void    m_restore_object(mapping);
 mapping m_save_object();
@@ -110,10 +100,10 @@ int	object_time(object default: F_THIS_OBJECT);
 int	objectp(mixed);
 void	obsolete(string);
 function papplyv(function, mixed *);
+int	pointerp(mixed);
 float	pow(float, float);
 object	present(int|object|string, object *|object default: F_THIS_OBJECT);
 object	previous_object(int default: F_CONST0);
-void	printf(string, ...);
 string	process_string(string, int default: F_CONST0); 
 mixed	process_value(string, int default: F_CONST0); 
 mixed	query_auth(object);
@@ -123,6 +113,7 @@ int	query_interactive(object|int);
 string  query_ip_ident(object default: F_THIS_OBJECT);
 string	query_ip_name(void|object);
 string	query_ip_number(void|object);
+string	query_living_name(object);
 object	query_snoop(object);
 string	query_trigverb();
 string	query_verb();
@@ -130,15 +121,15 @@ int	random(int, void|int);
 string	read_bytes(string, void|int, void|int);
 string	read_file(string, void|int, void|int); 
 string  readable_string(string);
+mixed reduce(function, mixed, void|mixed);
 string	*regexp(string *, string);
-int	remove_action(string);
 void    remove_alarm(int);
 int	rename(string, string);
 mapping	restore_map(string);
 int	restore_object(string);
 int	rm(string);
 int	rmdir(string);
-float	rnd();
+float	rnd(void|int);
 void	save_map(mapping, string);
 void	save_object(string);
 int     set_alarm(float, float, string|function, ...);
@@ -157,7 +148,6 @@ float	sqrt(float);
 mixed   str2val(string);
 int	stringp(mixed);
 int	strlen(int|string);
-string  strip_ansi(string);
 void	tail(string);
 float	tan(float);
 float	tanh(float);
@@ -165,13 +155,14 @@ int	test_bit(string, int);
 object	this_interactive();
 object	this_object();
 object	this_player();
-void	throw(mixed);
 int	time();
+int	typeof(mixed);
 mixed	*unique_array(int|mixed *, string|function, void|mixed);
 void	update_actions(object default: F_THIS_OBJECT);
+string	upper_case(int|string);
 object	*users();
 string  val2str(mixed);
-int	wildmatch(string, string);
+int	wildmatch(string, string|int);
 int	write_bytes(string, int, string);
 int	write_file(string, string);
 void    write_socket(string|int);
@@ -184,6 +175,8 @@ void set_screen_width(int);
 int query_screen_width();
 #endif /* WORD_WRAP */
 
-#ifdef COLOUR_SUPPORT
-void enable_colour( string, string, string );
-#endif
+/* added functions for AE Library Support */
+
+void	printf(string, ...);
+string  strip_ansi(string);
+int	arrayp(mixed);

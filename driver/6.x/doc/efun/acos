@@ -1,12 +1,12 @@
 NAME
-	acos - arcus cosinus
+        acos - trigonometric function operating on float
 
-SYNTAX
-	float acos(float v);
+SYNOPSIS
+        float   acos(float)
 
 DESCRIPTION
-	Return the arccosine value of v, given in radians.
+        acos() returns the arc-cosine of a floating point number.
+        The value returned is in radians.
 
 SEE ALSO
-	cos, sin, tan, asin, atan, sqrt, log, pow, exp
-
+        math - for a list of other math functions available.

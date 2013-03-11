@@ -32,7 +32,7 @@ NOTA BENE
 	performed in the object prior to the "add_action()".
 	
 SEE ALSO
-	remove_action, get_localcmd, query_verb
+	disable_commands, enable_commands, living, get_localcmd, query_verb
 
 OBSOLETE
 	void add_action(string function, string verb, void|int part)

@@ -33,9 +33,6 @@ get_simul_efun()
     extern int num_parse_error;
     extern char *inherit_file;
     extern char *current_loaded_file;
-#ifdef USE_SWAP
-    extern struct object *swap_ob;
-#endif
     extern void init_smart_log(void);
 
     f = fopen(SIMULFILE, "r");
@@ -75,25 +72,7 @@ get_simul_efun()
     ob->name = string_copy("secure/simul_efun");
     ob->prog = prog;
     ob->prog->flags |= PRAGMA_RESIDENT;
-    if (obj_list)
-    {
-	ob->next_all = obj_list;
-	ob->prev_all = obj_list->prev_all;
-	obj_list->prev_all->next_all = ob;
-	obj_list->prev_all = ob;
-	obj_list = ob;
-    }
-    else
-#ifdef USE_SWAP
-	swap_ob =
-#endif
-	obj_list = ob->next_all = ob->prev_all = ob;
     
-#ifdef USE_SWAP
-    if (current_object)
-	access_object(current_object);
-#endif
-
     simul_efun_ob = ob;
     add_ref(ob, "simul_efun");
     enter_object_hash(ob);	/* add name to fast object lookup table */

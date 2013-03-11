@@ -1,12 +1,11 @@
 NAME
-	log - natural logarithm
+        log - logarithmic function operating on a float
 
-SYNTAX
-	float log(float v);
+SYNOPSIS
+        float  log(float)
 
 DESCRIPTION
-	Return the natural logarithm of v.
+        log() returns the natural log of the given float.
 
 SEE ALSO
-	cos, sin, tan, asin, acos, atan, sqrt, pow, exp
-
+        math - for a list of other math functions available.

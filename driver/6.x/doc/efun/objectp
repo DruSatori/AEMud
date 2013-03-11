@@ -9,5 +9,5 @@ DESCRIPTION
 	and 0 otherwise.
 
 SEE ALSO
-	intp, stringp, arrayp, mappingp, floatp
+	intp, stringp, pointerp, mappingp, floatp
 
